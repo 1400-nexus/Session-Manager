@@ -122,6 +122,31 @@ once, logs `INCOMPLETE` with the missing-block preview. The shm cross-check
 on `aggregation.shm_crosscheck` — that gate is what makes the UDS record
 genuinely authoritative. Holds `ShmReader` only, never `ShmWriter`.
 
+`src/session_manager/domain/paths.py` — `is_unsafe_relpath`, pulled out of
+`authority.py` (no I/O, so it belongs in domain) so `publisher.py` can reuse
+the exact same check rather than a second copy that could drift.
+
+`src/session_manager/services/verifier.py` + `publisher.py` —
+`IntegrityVerifier.verify(spec) -> bool` hashes the staged file
+(`FileStore.staged_path`) via the `Hasher` port and compares hex digests,
+`log.error("hash_mismatch", ...)` with both on a miss; it never touches the
+filesystem itself. **Note:** `Hasher.compute_hash` is already `async` and
+already thread-offloaded (`adapters/blake3_hasher.py`, from Step 0) — the
+guide's "call it through asyncio.to_thread" is already satisfied one layer
+down, so verifier.py just `await`s it rather than double-wrapping.
+`Publisher.publish` / `.quarantine` re-check `is_unsafe_relpath` (defence in
+depth — this is the point a corrupting-link value becomes a filesystem
+write) then delegate to `FileStore`; two classes because verification is
+CPU-only and publication is a filesystem mutation, and they fail and test
+differently. `services/errors.py` gained `PublishRejected`. **No real
+`FileStore` adapter exists yet** — these are tested against
+`FakeFileStore`/`FakeHasher`, so "atomic rename" and "output directory empty
+on mismatch" are properties the future adapter must uphold; today's tests
+verify the orchestration (right method, right relpath, failure propagates
+without touching `staged`). `fake_file_store.py` gained `staged` tracking +
+`fail_next_publish`/`fail_next_quarantine`; `fake_hasher.py` gained
+`fail_next_compute_hash` (it had no failure injection at all before this).
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,

@@ -1,6 +1,5 @@
 import math
 from collections.abc import Awaitable, Callable
-from pathlib import PurePosixPath
 from typing import Any
 
 import rx_pb2
@@ -8,6 +7,7 @@ import structlog
 
 from session_manager.domain.ids import BlockId, SessionId
 from session_manager.domain.models import OpenSession, SessionSpec
+from session_manager.domain.paths import is_unsafe_relpath
 from session_manager.ipc import codec
 from session_manager.ports.protocols import FileLock, FileStore, Journal, ShmWriter
 from session_manager.services.errors import ManifestRejected
@@ -37,12 +37,6 @@ def _manifest_to_spec(manifest: Any) -> SessionSpec:
     )
 
 
-def _is_unsafe_relpath(relpath: str) -> bool:
-    if not relpath or relpath.startswith("/") or "\\" in relpath:
-        return True
-    return ".." in PurePosixPath(relpath).parts
-
-
 def _validate_spec(spec: SessionSpec) -> None:
     if spec.k <= 0 or spec.n <= 0 or spec.symbol_bytes <= 0:
         raise ManifestRejected(spec.session_id, "k, n and symbol_bytes must all be positive")
@@ -57,7 +51,7 @@ def _validate_spec(spec: SessionSpec) -> None:
             f"total_blocks {spec.total_blocks} does not match "
             f"ceil(file_size / (k * symbol_bytes)) = {expected_blocks}",
         )
-    if _is_unsafe_relpath(spec.relpath):
+    if is_unsafe_relpath(spec.relpath):
         raise ManifestRejected(
             spec.session_id,
             f"relpath {spec.relpath!r} is absolute or escapes the staging directory",
