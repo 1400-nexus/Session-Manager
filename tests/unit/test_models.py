@@ -4,7 +4,7 @@ import pytest
 
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 from session_manager.domain.models import (
-    STATE_NAME_TO_STATE,
+    SESSION_STATE_BY_WIRE_NAME,
     ReceiverCounters,
     SessionSnapshot,
     SessionSpec,
@@ -63,8 +63,8 @@ def test_sum_counters_of_nothing_is_the_zero_value() -> None:
 
 
 def test_state_name_table_covers_every_state() -> None:
-    assert STATE_NAME_TO_STATE["HASH_MISMATCH"] is SessionState.HASH_MISMATCH
-    assert set(STATE_NAME_TO_STATE) == {state.name for state in SessionState}
+    assert SESSION_STATE_BY_WIRE_NAME["HASH_MISMATCH"] is SessionState.HASH_MISMATCH
+    assert set(SESSION_STATE_BY_WIRE_NAME) == {state.name for state in SessionState}
 
 
 def _snapshot(**overrides: object) -> SessionSnapshot:

@@ -5,12 +5,8 @@ RECV_BUFFER_BYTES = 65536
 SEND_QUEUE_MAXSIZE = 64
 INCOMING_QUEUE_MAXSIZE = 256
 
-# Both ipc.Envelope and rx.RxEnvelope name their oneof group "msg".
 ENVELOPE_ONEOF_GROUP_NAME = "msg"
 
-# RxEnvelope oneof field names — the wire contract with the C++ receivers.
-# receiver_hello is the RX-side handshake message (file-monitor's Envelope
-# uses sender_hello for the same role on the TX side).
 RECEIVER_HELLO_FIELD_NAME = "receiver_hello"
 MANIFEST_SEEN_FIELD_NAME = "manifest_seen"
 BLOCK_DECODED_FIELD_NAME = "block_decoded"
