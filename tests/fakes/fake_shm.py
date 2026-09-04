@@ -1,12 +1,16 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 
+from session_manager.adapters.shm_layout import (
+    HEADER_SIZE,
+    AdoptDecision,
+    build_header,
+    header_is_valid,
+)
 from session_manager.domain.ids import BlockId, SessionId
 from session_manager.domain.models import SessionSpec
 
-FAKE_MAGIC = b"NXRXSHM\x00"
-FAKE_VERSION = 1
-HEADER_SIZE = 16
 DEFAULT_FAKE_ARENA_BYTES = 4096
 
 # A non-zero fill for an existing segment's payload so a test can tell "adopt
@@ -21,12 +25,6 @@ class SegmentState(Enum):
     INCOMPATIBLE = auto()
 
 
-class AdoptDecision(Enum):
-    CREATED = auto()
-    ADOPTED = auto()
-    REINITIALISED = auto()
-
-
 @dataclass(frozen=True)
 class _SessionRegion:
     block_table_offset: int
@@ -35,7 +33,7 @@ class _SessionRegion:
 
 
 def _valid_header() -> bytes:
-    return FAKE_MAGIC + FAKE_VERSION.to_bytes(HEADER_SIZE - len(FAKE_MAGIC), "little")
+    return build_header(b"\x00" * 16, 0, 0, 0)
 
 
 class FakeShm:
@@ -46,11 +44,16 @@ class FakeShm:
     not tested the invariant the port split exists to enforce. The four
     starting states (`SegmentState`) plus `set_receiver_alive` are the whole
     difficulty of the adopt-vs-create decision in Step 6.
+
+    Liveness: pass `probe_receiver_alive` to match `PosixShm`'s constructor
+    (the shared contract test does); otherwise `create_or_adopt` reads the
+    `set_receiver_alive` flag directly.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, probe_receiver_alive: Callable[[], bool] | None = None) -> None:
         self._buffer: bytearray | None = None
         self._receiver_alive: bool = False
+        self._probe: Callable[[], bool] | None = probe_receiver_alive
         self._sessions: dict[SessionId, _SessionRegion] = {}
         self._attached_name: str | None = None
         self.closed: bool = False
@@ -112,10 +115,10 @@ class FakeShm:
             return SegmentState.ABSENT
         if not self._header_valid():
             return SegmentState.INCOMPATIBLE
-        return SegmentState.LIVE if self._receiver_alive else SegmentState.STALE
+        return SegmentState.LIVE if self.probe_receiver_alive() else SegmentState.STALE
 
     def probe_receiver_alive(self) -> bool:
-        return self._receiver_alive
+        return self._probe() if self._probe is not None else self._receiver_alive
 
     def payload_bytes(self) -> bytes:
         buffer = self._buffer
@@ -151,7 +154,7 @@ class FakeShm:
             self._reinitialise()
             return False
 
-        if self._receiver_alive:
+        if self.probe_receiver_alive():
             self.last_decision = AdoptDecision.ADOPTED
             return True
 
@@ -214,11 +217,7 @@ class FakeShm:
 
     def _header_valid(self) -> bool:
         buffer = self._buffer
-        if buffer is None:
-            return False
-        magic = bytes(buffer[: len(FAKE_MAGIC)])
-        version = int.from_bytes(buffer[len(FAKE_MAGIC) : HEADER_SIZE], "little")
-        return magic == FAKE_MAGIC and version == FAKE_VERSION
+        return buffer is not None and header_is_valid(bytes(buffer[:HEADER_SIZE]))
 
     def _reinitialise(self) -> None:
         buffer = self._buffer

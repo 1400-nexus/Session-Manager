@@ -70,6 +70,29 @@ live segment left a receiver's bytes intact. `fail_next_create_or_adopt` /
 adapter on purpose — the adopt-vs-create cases can't be conjured against a
 real `/dev/shm` segment on demand.
 
+`src/session_manager/adapters/shm_layout.py` — the completion-segment header
+as a cross-language contract (like `ipc/handshake.py`): `struct` format string
+(explicit little-endian, no padding), `build_header` / `parse_header` /
+`header_is_valid`, and the `AdoptDecision` enum both shm impls report. The
+literal format/magic/version/offset live in `adapters/constants.py`.
+
+`src/session_manager/adapters/posix_shm.py` — `PosixShm`, the real
+implementation of both shm ports over `multiprocessing.shared_memory`.
+`probe_receiver_alive` is a constructor callable (the composition root wires
+it to the UDS server) so the adapter never imports a socket. `close()`
+releases every `memoryview` handed out by `bitmap_for` first — you cannot
+`SharedMemory.close()` while an exported view is alive. `detach_resource_
+tracker()` unregisters each segment from `multiprocessing.resource_tracker`,
+which would otherwise unlink the segment on a clean process exit — the exact
+failure this service exists to prevent; POSIX-only, guarded, uses `_name`
+because typeshed doesn't expose it.
+
+`tests/integration/test_shm_contract.py` — the shared contract suite: five
+adopt-vs-create cases parametrised over `FakeShm` and `PosixShm` via a
+`Harness` protocol. This is what keeps the fake honest. Runs on Windows too
+(SharedMemory works there; the harness keeps a handle open because Windows
+frees an unreferenced segment immediately).
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,

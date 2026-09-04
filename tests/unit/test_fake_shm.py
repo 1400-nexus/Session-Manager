@@ -1,14 +1,10 @@
 import pytest
 
+from session_manager.adapters.shm_layout import AdoptDecision
 from session_manager.domain.ids import BlockId, SessionId
 from session_manager.domain.models import SessionSpec
 from session_manager.ports.protocols import ShmReader, ShmWriter
-from tests.fakes.fake_shm import (
-    DEFAULT_FAKE_ARENA_BYTES,
-    AdoptDecision,
-    FakeShm,
-    SegmentState,
-)
+from tests.fakes.fake_shm import DEFAULT_FAKE_ARENA_BYTES, FakeShm, SegmentState
 
 SESSION = SessionId("s-1")
 
