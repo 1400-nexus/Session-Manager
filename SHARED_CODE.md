@@ -112,6 +112,16 @@ vs `ceil(file_size / k·symbol_bytes)`, `..` / absolute / backslash relpath),
 `ShmWriter.open_sessions()` was added to the port for the adopt-recovery
 path; `PosixShm` backs it with an on-segment session table in `shm_layout.py`.
 
+`src/session_manager/services/aggregator.py` — `ProgressAggregator`. Folds
+`BlockDecoded` into a per-session decoded set (idempotent; a block from two
+receivers is one block); refreshes the stall timer only on real growth, so
+duplicate spam can't keep a dead session looking alive. `poll()` builds a
+`SessionSnapshot`, hands `COMPLETE` ones to the verifier callback exactly
+once, logs `INCOMPLETE` with the missing-block preview. The shm cross-check
+(popcount vs the UDS count, `log.warning` on divergence naming both) is gated
+on `aggregation.shm_crosscheck` — that gate is what makes the UDS record
+genuinely authoritative. Holds `ShmReader` only, never `ShmWriter`.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,
