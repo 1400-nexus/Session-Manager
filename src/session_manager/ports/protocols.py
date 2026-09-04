@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Protocol, TypeVar
 
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
-from session_manager.domain.models import SessionSpec
+from session_manager.domain.models import OpenSession, SessionSpec
 
 ProcessHandle = TypeVar("ProcessHandle")
 
@@ -95,8 +95,11 @@ class ShmWriter(Protocol):
     the caller must not choose between the two, because the decision depends
     on whether a receiver answers and that logic belongs in one place.
     `init_session` and `purge_session` are the only ways session state
-    changes. `close(unlink=True)` removes the segment; pass False on an
-    unclean shutdown so a surviving receiver keeps its mapping.
+    changes; `open_sessions` re-reads the on-segment session table so an
+    authority that adopted a live segment learns which sessions are already
+    running rather than re-creating them. `close(unlink=True)` removes the
+    segment; pass False on an unclean shutdown so a surviving receiver keeps
+    its mapping.
     """
 
     def create_or_adopt(self, name: str, arena_bytes: int) -> bool: ...
@@ -104,6 +107,8 @@ class ShmWriter(Protocol):
     def init_session(
         self, spec: SessionSpec, block_table_offset: int, bitmap_offset: int
     ) -> None: ...
+
+    def open_sessions(self) -> tuple[OpenSession, ...]: ...
 
     def purge_session(self, session_id: SessionId) -> None: ...
 
@@ -148,3 +153,20 @@ class Journal(Protocol):
     def replay(self, session_id: SessionId) -> AsyncIterator[BlockId]: ...
 
     def sync(self) -> None: ...
+
+
+class FileLock(Protocol):
+    """Single-holder advisory lock on a path.
+
+    `acquire` is non-blocking: it raises `LockHeldError` (carrying the holding
+    pid, read from the lock file) rather than waiting, because two managers on
+    one shared-memory segment is the worst bug available here and the second
+    one must fail loudly, not queue. `release` is idempotent. The lock is held
+    for the process lifetime, so there is no timeout.
+    """
+
+    def acquire(self) -> None: ...
+
+    def release(self) -> None: ...
+
+    def holder_pid(self) -> int | None: ...

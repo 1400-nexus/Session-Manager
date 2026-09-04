@@ -19,11 +19,21 @@ from enum import Enum, auto
 from session_manager.adapters.constants import (
     SHM_HEADER_FORMAT,
     SHM_MAGIC,
+    SHM_SESSION_ENTRY_FORMAT,
+    SHM_SESSION_ID_BYTES,
     SHM_SESSION_TABLE_OFFSET,
     SHM_VERSION,
 )
+from session_manager.domain.ids import SessionId
+from session_manager.domain.models import OpenSession
 
 HEADER_SIZE = struct.calcsize(SHM_HEADER_FORMAT)
+
+# Session table at SHM_SESSION_TABLE_OFFSET: a u32 count followed by that many
+# fixed-size entries. Also a cross-language structure the C++ receivers read.
+SESSION_COUNT_FORMAT = "<I"
+SESSION_COUNT_SIZE = struct.calcsize(SESSION_COUNT_FORMAT)
+SESSION_ENTRY_SIZE = struct.calcsize(SHM_SESSION_ENTRY_FORMAT)
 
 
 class AdoptDecision(Enum):
@@ -69,3 +79,41 @@ def parse_header(raw: bytes | memoryview) -> SegmentHeader:
 
 def header_is_valid(raw: bytes | memoryview) -> bool:
     return parse_header(raw).is_valid
+
+
+def pack_session_table(sessions: tuple[OpenSession, ...]) -> bytes:
+    packed = struct.pack(SESSION_COUNT_FORMAT, len(sessions))
+    for session in sessions:
+        packed += struct.pack(
+            SHM_SESSION_ENTRY_FORMAT,
+            session.session_id.encode()[:SHM_SESSION_ID_BYTES],
+            session.total_blocks,
+            session.block_table_offset,
+            session.bitmap_offset,
+        )
+    return packed
+
+
+def unpack_session_table(raw: bytes | memoryview) -> tuple[OpenSession, ...]:
+    if len(raw) < SESSION_COUNT_SIZE:
+        return ()
+    (count,) = struct.unpack(SESSION_COUNT_FORMAT, bytes(raw[:SESSION_COUNT_SIZE]))
+    sessions: list[OpenSession] = []
+    cursor = SESSION_COUNT_SIZE
+    for _ in range(count):
+        entry = bytes(raw[cursor : cursor + SESSION_ENTRY_SIZE])
+        if len(entry) < SESSION_ENTRY_SIZE:
+            break
+        raw_id, total_blocks, block_table_offset, bitmap_offset = struct.unpack(
+            SHM_SESSION_ENTRY_FORMAT, entry
+        )
+        sessions.append(
+            OpenSession(
+                session_id=SessionId(raw_id.rstrip(b"\x00").decode()),
+                total_blocks=total_blocks,
+                block_table_offset=block_table_offset,
+                bitmap_offset=bitmap_offset,
+            )
+        )
+        cursor += SESSION_ENTRY_SIZE
+    return tuple(sessions)

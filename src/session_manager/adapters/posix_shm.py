@@ -3,14 +3,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing import resource_tracker, shared_memory
 
+from session_manager.adapters.constants import (
+    SHM_SESSION_TABLE_BYTES,
+    SHM_SESSION_TABLE_OFFSET,
+)
 from session_manager.adapters.shm_layout import (
     HEADER_SIZE,
     AdoptDecision,
     build_header,
     header_is_valid,
+    pack_session_table,
+    unpack_session_table,
 )
 from session_manager.domain.ids import BlockId, SessionId
-from session_manager.domain.models import SessionSpec
+from session_manager.domain.models import OpenSession, SessionSpec
 
 _BOOT_ID_BYTES = 16
 
@@ -39,6 +45,7 @@ def detach_resource_tracker(segment: shared_memory.SharedMemory) -> None:
 
 @dataclass(frozen=True)
 class _SessionRegion:
+    total_blocks: int
     block_table_offset: int
     bitmap_offset: int
     bitmap_len: int
@@ -82,6 +89,7 @@ class PosixShm:
             return False
 
         if self._probe_receiver_alive():
+            self._sessions = self._read_session_table()
             self.last_decision = AdoptDecision.ADOPTED
             return True
 
@@ -98,14 +106,28 @@ class PosixShm:
                 f"{bitmap_offset + bitmap_len}) does not fit an arena of {len(buffer)}"
             )
         self._sessions[spec.session_id] = _SessionRegion(
+            total_blocks=spec.total_blocks,
             block_table_offset=block_table_offset,
             bitmap_offset=bitmap_offset,
             bitmap_len=bitmap_len,
         )
         buffer[bitmap_offset : bitmap_offset + bitmap_len] = bytes(bitmap_len)
+        self._write_session_table()
+
+    def open_sessions(self) -> tuple[OpenSession, ...]:
+        return tuple(
+            OpenSession(
+                session_id=session_id,
+                total_blocks=region.total_blocks,
+                block_table_offset=region.block_table_offset,
+                bitmap_offset=region.bitmap_offset,
+            )
+            for session_id, region in self._sessions.items()
+        )
 
     def purge_session(self, session_id: SessionId) -> None:
-        self._sessions.pop(session_id, None)
+        if self._sessions.pop(session_id, None) is not None:
+            self._write_session_table()
 
     def close(self, unlink: bool) -> None:
         for view in self._exported_views:
@@ -166,6 +188,32 @@ class PosixShm:
         buffer[HEADER_SIZE:] = bytes(len(buffer) - HEADER_SIZE)
         self._write_header(buffer)
         self._sessions.clear()
+
+    def _write_session_table(self) -> None:
+        packed = pack_session_table(self.open_sessions())
+        if len(packed) > SHM_SESSION_TABLE_BYTES:
+            raise ValueError(
+                f"session table needs {len(packed)} bytes, "
+                f"more than the reserved {SHM_SESSION_TABLE_BYTES}"
+            )
+        buffer = self._buffer()
+        buffer[SHM_SESSION_TABLE_OFFSET : SHM_SESSION_TABLE_OFFSET + len(packed)] = packed
+
+    def _read_session_table(self) -> dict[SessionId, _SessionRegion]:
+        table = unpack_session_table(
+            self._buffer()[
+                SHM_SESSION_TABLE_OFFSET : SHM_SESSION_TABLE_OFFSET + SHM_SESSION_TABLE_BYTES
+            ]
+        )
+        return {
+            session.session_id: _SessionRegion(
+                total_blocks=session.total_blocks,
+                block_table_offset=session.block_table_offset,
+                bitmap_offset=session.bitmap_offset,
+                bitmap_len=(session.total_blocks + 7) // 8,
+            )
+            for session in table
+        }
 
     def _write_header(self, buffer: memoryview) -> None:
         slot_count = len(buffer) // self._slot_bytes if self._slot_bytes else 0

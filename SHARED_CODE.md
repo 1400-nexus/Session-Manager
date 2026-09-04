@@ -93,6 +93,25 @@ adopt-vs-create cases parametrised over `FakeShm` and `PosixShm` via a
 (SharedMemory works there; the harness keeps a handle open because Windows
 frees an unreferenced segment immediately).
 
+`src/session_manager/adapters/flock_file_lock.py` + `adapters/errors.py`
+(`LockHeldError`) + `tests/fakes/fake_file_lock.py` — the `FileLock` port.
+`FlockFileLock` is `fcntl.flock` (POSIX-only; its integration test is
+`importorskip`-guarded, `mypy` sees it because `platform = "linux"`), writing
+its pid into the file so a refused acquire can name the holder.
+
+`src/session_manager/services/authority.py` + `services/errors.py`
+(`ManifestRejected`) + fakes `fake_journal.py`, `fake_file_store.py` —
+`SessionAuthority`, the sole writer of session state. `start()` takes the
+`flock` before touching shm, then `create_or_adopt`; on adopt it replays the
+journal per `ShmWriter.open_sessions()` to rebuild each decoded set.
+`handle_manifest_seen` dedupes (first of three identical `ManifestSeen` wins,
+no inter-receiver lock — that is the point), translates the `Manifest`
+(wire `block_bytes` = symbol size), validates (`k >= n`, `total_blocks`
+vs `ceil(file_size / k·symbol_bytes)`, `..` / absolute / backslash relpath),
+`fallocate`s, `init_session`s, then broadcasts one `SessionOpen`.
+`ShmWriter.open_sessions()` was added to the port for the adopt-recovery
+path; `PosixShm` backs it with an on-segment session table in `shm_layout.py`.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,

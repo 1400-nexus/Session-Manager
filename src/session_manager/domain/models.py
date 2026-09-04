@@ -54,6 +54,14 @@ class SessionSpec:
 
 
 @dataclass(frozen=True)
+class OpenSession:
+    session_id: SessionId
+    total_blocks: int
+    block_table_offset: int
+    bitmap_offset: int
+
+
+@dataclass(frozen=True)
 class ReceiverCounters:
     pkts_ok: int = 0
     crc_fail: int = 0

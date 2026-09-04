@@ -9,7 +9,7 @@ from session_manager.adapters.shm_layout import (
     header_is_valid,
 )
 from session_manager.domain.ids import BlockId, SessionId
-from session_manager.domain.models import SessionSpec
+from session_manager.domain.models import OpenSession, SessionSpec
 
 DEFAULT_FAKE_ARENA_BYTES = 4096
 
@@ -27,6 +27,7 @@ class SegmentState(Enum):
 
 @dataclass(frozen=True)
 class _SessionRegion:
+    total_blocks: int
     block_table_offset: int
     bitmap_offset: int
     bitmap_len: int
@@ -176,11 +177,23 @@ class FakeShm:
             )
 
         self._sessions[spec.session_id] = _SessionRegion(
+            total_blocks=spec.total_blocks,
             block_table_offset=block_table_offset,
             bitmap_offset=bitmap_offset,
             bitmap_len=bitmap_len,
         )
         buffer[bitmap_offset : bitmap_offset + bitmap_len] = bytes(bitmap_len)
+
+    def open_sessions(self) -> tuple[OpenSession, ...]:
+        return tuple(
+            OpenSession(
+                session_id=session_id,
+                total_blocks=region.total_blocks,
+                block_table_offset=region.block_table_offset,
+                bitmap_offset=region.bitmap_offset,
+            )
+            for session_id, region in self._sessions.items()
+        )
 
     def purge_session(self, session_id: SessionId) -> None:
         self._sessions.pop(session_id, None)
