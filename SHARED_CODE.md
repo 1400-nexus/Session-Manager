@@ -58,6 +58,18 @@ branch per field, per-consumer frozen dataclasses (`PathsConfig`, `ShmConfig`,
 names the offending key. `k`/`n`/`symbol_bytes` are deliberately not config —
 they arrive per-session in the Manifest.
 
+`tests/fakes/fake_shm.py` — new, no file-monitor equivalent (the TX side has
+no shared memory). `FakeShm` satisfies both `ShmReader` and `ShmWriter` over a
+`bytearray`; `bitmap_for` returns `memoryview(...).toreadonly()`. Test-driven
+via `set_existing_segment` (absent / live / stale / incompatible),
+`set_receiver_alive`, `corrupt_header`, `seed_payload`; records
+`last_decision` (`CREATED` / `ADOPTED` / `REINITIALISED`) and exposes
+`payload_is_zeroed()` so a test asserts the *decision* and that adopting a
+live segment left a receiver's bytes intact. `fail_next_create_or_adopt` /
+`fail_next_init_session` for failure injection. Built before the real POSIX
+adapter on purpose — the adopt-vs-create cases can't be conjured against a
+real `/dev/shm` segment on demand.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,
