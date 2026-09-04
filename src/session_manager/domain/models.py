@@ -14,7 +14,9 @@ from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 
 MISSING_BLOCKS_PREVIEW_LIMIT = 32
 
-_PEAK_GAUGE_FIELDS: frozenset[str] = frozenset({"arena_high_water_pct"})
+# ReceiverStats.arena_high_water_pct is a gauge (a peak fill percentage), not
+# a monotonic counter -- aggregating it across receivers is a max, not a sum.
+_GAUGE_FIELD_NAME = "arena_high_water_pct"
 
 
 class SessionState(Enum):
@@ -26,6 +28,9 @@ class SessionState(Enum):
     FAILED = auto()
 
 
+# rx_pb2 at the pinned contract (cef65a6) has no SessionStatus.State enum, so
+# the boundary layer translates by name against this table until the proto
+# gains one. When it does, delete this and translate by SessionState[wire_name].
 SESSION_STATE_BY_WIRE_NAME: dict[str, SessionState] = {state.name: state for state in SessionState}
 
 
@@ -42,6 +47,9 @@ class SessionSpec:
 
     @property
     def block_bytes(self) -> int:
+        # The wire field common.Manifest.block_bytes carries the SYMBOL size,
+        # not the block size -- the boundary layer copies it into `symbol_bytes`.
+        # The real per-block byte count is k symbols wide.
         return self.k * self.symbol_bytes
 
 
@@ -62,7 +70,7 @@ class ReceiverCounters:
         for field in fields(self):
             left: int = getattr(self, field.name)
             right: int = getattr(other, field.name)
-            if field.name in _PEAK_GAUGE_FIELDS:
+            if field.name == _GAUGE_FIELD_NAME:
                 combined[field.name] = max(left, right)
             else:
                 combined[field.name] = left + right
@@ -83,6 +91,9 @@ class SessionSnapshot:
     blocks_decoded: int
     total_blocks: int
     observed_loss_pct: float
+    # A sorted tuple, not a dict: `frozen=True` stops rebinding, not mutation,
+    # and a shared mutable container is the reach into live state this snapshot
+    # exists to prevent.
     per_receiver: tuple[tuple[ReceiverId, ReceiverCounters], ...]
     live_receivers: frozenset[ReceiverId]
     missing_blocks: tuple[BlockId, ...]
