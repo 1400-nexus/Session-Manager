@@ -1,0 +1,3 @@
+[submodule "libs/nexus-proto"]
+	path = libs/nexus-proto
+	url = https://github.com/1400-nexus/nexus-proto.git

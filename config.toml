@@ -1,0 +1,22 @@
+# Step 0 placeholder. No config loader has been copied yet; the real schema
+# (staging dir, shm segment, journal, receiver_count) lands with the
+# session_manager service layer in a later step.
+
+[paths]
+staging_path = "./staging"
+socket_path = "./run/session-manager.sock"
+
+# fec.k, fec.n, and fec.symbol_bytes are a cross-service contract with the
+# C++ sender and receiver. They MUST match file-monitor's config exactly — a
+# mismatch does not fail loudly, it produces transfers that complete
+# "successfully" and write garbage. Do not change these unilaterally.
+[fec]
+k = 200
+n = 255
+symbol_bytes = 1400
+
+# receiver_count = 0 means "supervise nothing" -- the C++ receiver binary
+# lives in a different repo and won't exist here until it's built or mounted.
+[receivers]
+binary_path = "./bin/nexus-receiver"
+receiver_count = 0
