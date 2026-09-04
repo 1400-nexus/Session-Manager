@@ -2,10 +2,11 @@ import dataclasses
 
 import pytest
 
-from session_manager.domain.ids import SessionId
+from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 from session_manager.domain.models import (
     STATE_NAME_TO_STATE,
     ReceiverCounters,
+    SessionSnapshot,
     SessionSpec,
     SessionState,
     sum_counters,
@@ -64,3 +65,41 @@ def test_sum_counters_of_nothing_is_the_zero_value() -> None:
 def test_state_name_table_covers_every_state() -> None:
     assert STATE_NAME_TO_STATE["HASH_MISMATCH"] is SessionState.HASH_MISMATCH
     assert set(STATE_NAME_TO_STATE) == {state.name for state in SessionState}
+
+
+def _snapshot(**overrides: object) -> SessionSnapshot:
+    base: dict[str, object] = {
+        "spec": _spec(),
+        "state": SessionState.OPEN,
+        "blocks_decoded": 2,
+        "total_blocks": 4,
+        "observed_loss_pct": 1.5,
+        "per_receiver": (
+            (ReceiverId(0), ReceiverCounters(pkts_ok=10)),
+            (ReceiverId(1), ReceiverCounters(pkts_ok=20)),
+        ),
+        "live_receivers": frozenset({ReceiverId(0), ReceiverId(1)}),
+        "missing_blocks": (BlockId(2), BlockId(3)),
+        "missing_block_count": 2,
+    }
+    base.update(overrides)
+    return SessionSnapshot(**base)  # type: ignore[arg-type]
+
+
+def test_session_snapshot_is_hashable_now_that_it_holds_no_dict() -> None:
+    assert hash(_snapshot()) == hash(_snapshot())
+
+
+def test_session_snapshot_counters_for_looks_up_by_receiver_id() -> None:
+    snapshot = _snapshot()
+    assert snapshot.counters_for(ReceiverId(1)) == ReceiverCounters(pkts_ok=20)
+
+
+def test_session_snapshot_counters_for_unknown_receiver_is_none() -> None:
+    assert _snapshot().counters_for(ReceiverId(99)) is None
+
+
+def test_session_snapshot_missing_block_count_can_exceed_the_previewed_ids() -> None:
+    snapshot = _snapshot(missing_blocks=(BlockId(0),), missing_block_count=1278)
+    assert len(snapshot.missing_blocks) == 1
+    assert snapshot.missing_block_count == 1278

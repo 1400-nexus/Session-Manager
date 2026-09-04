@@ -76,6 +76,15 @@ def sum_counters(per_receiver: Collection["ReceiverCounters"]) -> "ReceiverCount
     return total
 
 
+# On a link with no back channel the missing-block list IS the recovery
+# instruction, so it must stay computable exactly -- but the full enumeration
+# (over a thousand ids for a large file with a dead receiver) does not belong
+# in a snapshot rebuilt several times a second. The snapshot carries only a
+# capped preview plus the true count; the exhaustive list is recomputed on
+# demand from progress.missing_blocks at final failure reporting.
+MISSING_BLOCKS_PREVIEW_LIMIT = 32
+
+
 @dataclass(frozen=True)
 class SessionSnapshot:
     spec: SessionSpec
@@ -83,6 +92,18 @@ class SessionSnapshot:
     blocks_decoded: int
     total_blocks: int
     observed_loss_pct: float
-    per_receiver: dict[ReceiverId, ReceiverCounters]
+    # Sorted by receiver id, and a tuple rather than a dict: `frozen=True` only
+    # stops the attribute being rebound, not the container being mutated, and a
+    # shared mutable dict is exactly the reach into live state this snapshot
+    # exists to prevent (it also leaves __hash__ broken). The aggregator that
+    # builds the snapshot is responsible for the sort.
+    per_receiver: tuple[tuple[ReceiverId, ReceiverCounters], ...]
     live_receivers: frozenset[ReceiverId]
     missing_blocks: tuple[BlockId, ...]
+    missing_block_count: int
+
+    def counters_for(self, receiver_id: ReceiverId) -> ReceiverCounters | None:
+        for candidate_id, counters in self.per_receiver:
+            if candidate_id == receiver_id:
+                return counters
+        return None
