@@ -10,5 +10,7 @@ PERSON_C_GUIDE.md
 CLAUDE.md
 
 /staging/
+/output/
+/journal/
 /run/
 /bin/

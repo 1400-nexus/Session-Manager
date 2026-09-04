@@ -1,22 +1,40 @@
-# Step 0 placeholder. No config loader has been copied yet; the real schema
-# (staging dir, shm segment, journal, receiver_count) lands with the
-# session_manager service layer in a later step.
+# RX-side session manager. Relative paths resolve against this file's
+# directory, not the process working directory. Every key can be overridden
+# by a NEXUS_-prefixed environment variable (see .env.example).
 
 [paths]
-staging_path = "./staging"
+staging_dir = "./staging"
+output_dir = "./output"
+journal_dir = "./journal"
+run_dir = "./run"
 socket_path = "./run/session-manager.sock"
+lock_path = "./run/session-manager.lock"
 
-# fec.k, fec.n, and fec.symbol_bytes are a cross-service contract with the
-# C++ sender and receiver. They MUST match file-monitor's config exactly — a
-# mismatch does not fail loudly, it produces transfers that complete
-# "successfully" and write garbage. Do not change these unilaterally.
-[fec]
-k = 200
-n = 255
-symbol_bytes = 1400
+[shm]
+name = "nexus-rx"
+arena_bytes = 268435456
+slot_bytes = 4194304
 
-# receiver_count = 0 means "supervise nothing" -- the C++ receiver binary
-# lives in a different repo and won't exist here until it's built or mounted.
+[aggregation]
+poll_interval_s = 1.0
+stall_timeout_s = 8.0
+# The shm bitmap is a cross-check against the UDS BlockDecoded stream, never
+# the source of truth. Disable only if the mentors rule the shared arena out.
+shm_crosscheck = true
+
+# count = 0 means "supervise nothing" -- the C++ receiver binary lives in a
+# different repo and will not exist here until it is built or mounted. ports
+# must have at least `count` entries.
 [receivers]
+count = 0
+ports = [9100, 9101, 9102]
 binary_path = "./bin/nexus-receiver"
-receiver_count = 0
+
+[status]
+refresh_interval_s = 0.5
+force_terminal = false
+
+# fec.k / fec.n / fec.symbol_bytes are deliberately absent: they arrive
+# per-session in the Manifest. Pinning them here would give a receiver that
+# decodes correctly until someone retunes K on the TX side, then writes
+# garbage that looks like packet loss.

@@ -35,12 +35,19 @@ COPY libs/nexus-proto/proto /etc/nexus/proto
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-RUN mkdir -p /run/nexus /var/nexus/staging && chown -R nexus:nexus /run/nexus /var/nexus
+RUN mkdir -p /run/nexus /var/nexus/staging /var/nexus/output /var/nexus/journal \
+    && chown -R nexus:nexus /run/nexus /var/nexus
 
+# staging_dir and output_dir must share a filesystem -- publish is an atomic
+# rename. Both are under /var/nexus here; keep them together if you remount.
 ENV NEXUS_CONFIG=/etc/nexus/config.toml \
     NEXUS_PROTO_CONTRACT_DIR=/etc/nexus/proto \
-    NEXUS_STAGING_PATH=/var/nexus/staging \
+    NEXUS_STAGING_DIR=/var/nexus/staging \
+    NEXUS_OUTPUT_DIR=/var/nexus/output \
+    NEXUS_JOURNAL_DIR=/var/nexus/journal \
+    NEXUS_RUN_DIR=/run/nexus \
     NEXUS_SOCKET_PATH=/run/nexus/session-manager.sock \
+    NEXUS_LOCK_PATH=/run/nexus/session-manager.lock \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

@@ -22,7 +22,6 @@ and nothing connects. Check with `git submodule status`.
 | `tests/fakes/fake_clock.py` | `file-monitor` | `FakeClock` — manually advanced; `sleep` advances time. |
 | `tests/fakes/fake_spawner.py` | `file-monitor` | `FakeSpawner` / `FakeProcess` — spawn-failure injection, kill/terminate, `reaped` → `ProcessLookupError`. |
 | `tests/fakes/fake_hasher.py` | `file-monitor` | `FakeHasher` — fixed digest. |
-| `tests/fakes/fake_file_events.py` | `file-monitor` | `FakeFileEvents` — emit paths, inject exceptions. |
 | `tests/unit/test_supervisor.py` | `file-monitor` | Supervisor + `FakeSpawner`/`FakeClock`: backoff schedule, spawn-failure retry, degraded-and-stop, shutdown leaves nothing alive, **backoff interrupted by the stop event**. |
 
 ## Copied and adapted
@@ -41,19 +40,32 @@ the codec was repointed from `ipc_pb2.Envelope` to `rx_pb2.RxEnvelope`.
 | `src/session_manager/ipc/uds.py` | `ipc/uds.py` | `SenderId`→`ReceiverId`; handshake accepts `receiver_hello` and reads `hello.receiver_id`; log keys renamed. **The three hard-won behaviours below are unchanged in shape** — do not "simplify" them. |
 | `src/session_manager/ipc/errors.py` | `ipc/errors.py` | `UnknownSenderError`→`UnknownReceiverError`; `sender_id`→`receiver_id` in every message and attribute; `HandshakeError` says "expected receiver_hello". |
 | `src/session_manager/ipc/handshake.py` | `ipc/handshake.py` | `verify_proto_hash` parameter `sender_id`→`receiver_id`; docstring says "the Python services (file-monitor, session-manager)". The **algorithm is byte-identical** — the C++ side implements from that prose. |
-| `src/session_manager/ports/protocols.py` | `ports/protocols.py` | Seeded from the copy; `IpcServer` speaks `ReceiverId`. Step 2 added invariant docstrings to every port and the RX-only ports `ShmReader` / `ShmWriter` (split so a reader can never hold a writable view into receiver memory), `FileStore`, `Journal`. `FileEvents` is carried over from file-monitor but unused on the RX side -- prune it (and its fake) when a step confirms nothing needs it. |
+| `src/session_manager/ports/protocols.py` | `ports/protocols.py` | Seeded from the copy; `IpcServer` speaks `ReceiverId`. Step 2 added invariant docstrings to every port and the RX-only ports `ShmReader` / `ShmWriter` (split so a reader can never hold a writable view into receiver memory), `FileStore`, `Journal`. `FileEvents` (and `tests/fakes/fake_file_events.py`) were pruned in Step 3 — the RX side has no directory to watch. |
 | `src/session_manager/domain/ids.py` | `domain/ids.py` | `SenderId`→`ReceiverId`. `SessionId`/`BlockId`/`SymbolId` unchanged. |
 | `tests/fakes/fake_ipc_server.py` | `tests/fakes/fake_ipc_server.py` | `SenderId`→`ReceiverId`; keeps per-peer send-failure injection. |
 | `tests/unit/test_handshake.py` | `tests/unit/test_handshake.py` | `SenderId(1)`→`ReceiverId(1)` in the two `verify_proto_hash` cases. Real-contract digest test unchanged. |
 | `tests/unit/test_codec.py` | `tests/unit/test_codec.py` | Round-trips `ReceiverHello`, `BlockDecoded`, and the cross-package `ipc_pb2.Heartbeat`; rejects an empty `RxEnvelope`. |
 | `tests/integration/test_uds.py` | `tests/integration/test_uds.py` | Real `AF_UNIX`/`SOCK_SEQPACKET` server, `ReceiverHello` handshake, RX message types (`SessionOpen`/`PurgeSession` server→receiver, `BlockDecoded`/`Heartbeat` receiver→server), mismatched `proto_hash` refused, full send queue, write-failure teardown, **and a peer-identity-on-reconnect test**. Skipped (not faked) on a host without `AF_UNIX` — e.g. Windows dev boxes; it runs on the Linux grading machines. |
 
+## Written fresh (patterned on file-monitor, not copied)
+
+`src/session_manager/config.py` and `src/session_manager/constants.py` — the
+RX schema is entirely different from file-monitor's TX one, but they follow
+its shape: one `constants.py` holding every section/key/env-var/default, an
+`ENV_OVERRIDES` data table (env var → section → key → caster) instead of one
+branch per field, per-consumer frozen dataclasses (`PathsConfig`, `ShmConfig`,
+…) rather than a god object, and `validate_config` raising `ValueError` that
+names the offending key. `k`/`n`/`symbol_bytes` are deliberately not config —
+they arrive per-session in the Manifest.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,
 `.gitignore`, `.env.example` — package renamed `file-monitor`/`file_monitor`
-→ `session-manager`/`session_manager`; container `NEXUS_WATCH_PATH` →
-`NEXUS_STAGING_PATH`; socket basename changed. **The hatch `force-include` of
+→ `session-manager`/`session_manager`; container paths renamed to the RX
+schema (`NEXUS_WATCH_PATH` → `NEXUS_STAGING_DIR`, plus `NEXUS_OUTPUT_DIR` /
+`NEXUS_JOURNAL_DIR` / `NEXUS_RUN_DIR` / `NEXUS_LOCK_PATH`); socket basename
+changed. **The hatch `force-include` of
 `libs/nexus-proto/generated/python` at the wheel root is kept** — the flat
 proto modules (`rx_pb2.py` does `import common_pb2`) must land on `sys.path`,
 never nested in a package:

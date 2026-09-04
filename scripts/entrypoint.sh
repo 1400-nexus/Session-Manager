@@ -8,7 +8,8 @@ EX_CONFIG=78
 
 missing=""
 [ -z "${NEXUS_CONFIG:-}" ] && missing="$missing NEXUS_CONFIG"
-[ -z "${NEXUS_STAGING_PATH:-}" ] && missing="$missing NEXUS_STAGING_PATH"
+[ -z "${NEXUS_STAGING_DIR:-}" ] && missing="$missing NEXUS_STAGING_DIR"
+[ -z "${NEXUS_OUTPUT_DIR:-}" ] && missing="$missing NEXUS_OUTPUT_DIR"
 [ -z "${NEXUS_SOCKET_PATH:-}" ] && missing="$missing NEXUS_SOCKET_PATH"
 [ -z "${NEXUS_PROTO_CONTRACT_DIR:-}" ] && missing="$missing NEXUS_PROTO_CONTRACT_DIR"
 
@@ -36,6 +37,6 @@ if [ -z "$proto_file_found" ]; then
     exit "$EX_CONFIG"
 fi
 
-mkdir -p "$NEXUS_STAGING_PATH" "$(dirname "$NEXUS_SOCKET_PATH")"
+mkdir -p "$NEXUS_STAGING_DIR" "$NEXUS_OUTPUT_DIR" "$(dirname "$NEXUS_SOCKET_PATH")"
 
 exec "$@"

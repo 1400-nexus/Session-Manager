@@ -21,19 +21,6 @@ class Clock(Protocol):
     async def sleep(self, seconds: float) -> None: ...
 
 
-class FileEvents(Protocol):
-    """Filesystem-event stream over a watched directory.
-
-    `listen` yields each path once, only after the file is safe to read
-    (writer closed or atomic rename landed), never on a partial write.
-    `close` stops the stream; a `listen` iterator in progress then completes.
-    """
-
-    def listen(self) -> AsyncIterator[Path]: ...
-
-    def close(self) -> None: ...
-
-
 class Hasher(Protocol):
     """File content hash.
 
