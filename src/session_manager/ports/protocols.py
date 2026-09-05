@@ -155,6 +155,29 @@ class Journal(Protocol):
     def sync(self) -> None: ...
 
 
+class SessionSpecStore(Protocol):
+    """Durable `SessionSpec` storage, keyed by session id.
+
+    `ShmWriter.open_sessions()` (the on-segment session table) carries only
+    session_id/total_blocks/offsets -- not enough to rebuild a full
+    `SessionSpec` after a restart. This is the missing piece: an authority
+    that adopts a live segment loads the spec for each recovered session
+    from here, rather than needing the sender to resend a `ManifestSeen`
+    that would otherwise be treated as a duplicate and dropped. `save` must
+    be durable before it returns -- it is called once, at session creation,
+    not on a hot path. `load` returns `None` for a session that was never
+    saved or whose record is unreadable; it does not raise, since a missing
+    spec on recovery is a degraded-but-survivable state, not this port's
+    failure to report.
+    """
+
+    def save(self, spec: SessionSpec) -> None: ...
+
+    def load(self, session_id: SessionId) -> SessionSpec | None: ...
+
+    def delete(self, session_id: SessionId) -> None: ...
+
+
 class FileLock(Protocol):
     """Single-holder advisory lock on a path.
 

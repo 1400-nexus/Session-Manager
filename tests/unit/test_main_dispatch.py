@@ -36,6 +36,7 @@ from tests.fakes.fake_file_store import FakeFileStore
 from tests.fakes.fake_hasher import FakeHasher
 from tests.fakes.fake_ipc_server import FakeIpcServer
 from tests.fakes.fake_journal import FakeJournal
+from tests.fakes.fake_session_spec_store import FakeSessionSpecStore
 from tests.fakes.fake_shm import FakeShm
 
 ARENA_BYTES = 1 << 20
@@ -83,6 +84,7 @@ def _context(
         shm=shm,
         file_store=FakeFileStore(),
         journal=journal,
+        spec_store=FakeSessionSpecStore(),
         broadcast=lambda payload: asyncio.sleep(0),
         shm_name="seg",
         arena_bytes=ARENA_BYTES,

@@ -9,7 +9,13 @@ from session_manager.domain.ids import BlockId, SessionId
 from session_manager.domain.models import OpenSession, SessionSpec
 from session_manager.domain.paths import is_unsafe_relpath
 from session_manager.ipc import codec
-from session_manager.ports.protocols import FileLock, FileStore, Journal, ShmWriter
+from session_manager.ports.protocols import (
+    FileLock,
+    FileStore,
+    Journal,
+    SessionSpecStore,
+    ShmWriter,
+)
 from session_manager.services.errors import ManifestRejected
 
 logger = structlog.get_logger(__name__)
@@ -73,6 +79,7 @@ class SessionAuthority:
         shm: ShmWriter,
         file_store: FileStore,
         journal: Journal,
+        spec_store: SessionSpecStore,
         broadcast: Broadcast,
         shm_name: str,
         arena_bytes: int,
@@ -82,12 +89,14 @@ class SessionAuthority:
         self._shm: ShmWriter = shm
         self._file_store: FileStore = file_store
         self._journal: Journal = journal
+        self._spec_store: SessionSpecStore = spec_store
         self._broadcast: Broadcast = broadcast
         self._shm_name: str = shm_name
         self._arena_bytes: int = arena_bytes
         self._next_offset: int = session_region_base
         self._known: dict[SessionId, OpenSession] = {}
         self._recovered: dict[SessionId, frozenset[BlockId]] = {}
+        self._recovered_specs: dict[SessionId, SessionSpec] = {}
         self._adopted: bool = False
 
     async def start(self) -> None:
@@ -117,6 +126,9 @@ class SessionAuthority:
 
         self._file_store.allocate(spec.relpath, spec.file_size)
         self._shm.init_session(spec, block_table_offset, bitmap_offset)
+        # Durable before broadcasting: an adopting restart after this point
+        # recovers the full spec, not just the decoded blocks.
+        self._spec_store.save(spec)
         self._next_offset = region_end
         self._known[session_id] = OpenSession(
             session_id=session_id,
@@ -129,6 +141,9 @@ class SessionAuthority:
 
     def recovered_blocks(self, session_id: SessionId) -> frozenset[BlockId]:
         return self._recovered.get(session_id, frozenset())
+
+    def recovered_specs(self) -> tuple[SessionSpec, ...]:
+        return tuple(self._recovered_specs.values())
 
     def adopted(self) -> bool:
         return self._adopted
@@ -146,6 +161,23 @@ class SessionAuthority:
             async for block_id in self._journal.replay(open_session.session_id):
                 decoded.add(block_id)
             self._recovered[open_session.session_id] = frozenset(decoded)
+
+            spec = self._spec_store.load(open_session.session_id)
+            if spec is None:
+                # The bytes are safe (decoded set above, bitmap in shm) but
+                # without the spec this session can never be handed to the
+                # aggregator, so it can never verify or publish. It stays in
+                # _known so a resent ManifestSeen is (correctly) treated as
+                # a duplicate rather than re-init_session-ing and zeroing a
+                # bitmap receivers are still writing into.
+                logger.error(
+                    "session_spec_missing_on_recovery",
+                    session_id=open_session.session_id,
+                    decoded_blocks=len(decoded),
+                )
+                continue
+            self._recovered_specs[open_session.session_id] = spec
+
             logger.info(
                 "session_recovered",
                 session_id=open_session.session_id,

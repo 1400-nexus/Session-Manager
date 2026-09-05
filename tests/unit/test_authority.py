@@ -15,6 +15,7 @@ from session_manager.services.errors import ManifestRejected
 from tests.fakes.fake_file_lock import FakeFileLock
 from tests.fakes.fake_file_store import FakeFileStore
 from tests.fakes.fake_journal import FakeJournal
+from tests.fakes.fake_session_spec_store import FakeSessionSpecStore
 from tests.fakes.fake_shm import FakeShm
 
 ARENA_BYTES = 1 << 20
@@ -66,6 +67,7 @@ class _Rig:
     shm: FakeShm
     store: FakeFileStore
     journal: FakeJournal
+    spec_store: FakeSessionSpecStore
     broadcasts: list[bytes] = field(default_factory=list)
 
 
@@ -75,11 +77,13 @@ def _rig(
     lock: FakeFileLock | None = None,
     shm: FakeShm | None = None,
     journal: FakeJournal | None = None,
+    spec_store: FakeSessionSpecStore | None = None,
 ) -> _Rig:
     lock = lock or FakeFileLock()
     shm = shm or FakeShm(probe_receiver_alive=lambda: alive)
     store = FakeFileStore()
     journal = journal or FakeJournal()
+    spec_store = spec_store or FakeSessionSpecStore()
     broadcasts: list[bytes] = []
 
     async def broadcast(payload: bytes) -> None:
@@ -90,12 +94,13 @@ def _rig(
         shm=shm,
         file_store=store,
         journal=journal,
+        spec_store=spec_store,
         broadcast=broadcast,
         shm_name=SHM_NAME,
         arena_bytes=ARENA_BYTES,
         session_region_base=REGION_BASE,
     )
-    return _Rig(authority, lock, shm, store, journal, broadcasts)
+    return _Rig(authority, lock, shm, store, journal, spec_store, broadcasts)
 
 
 async def test_three_simultaneous_manifest_seen_produce_one_session_open() -> None:
@@ -115,6 +120,18 @@ async def test_three_simultaneous_manifest_seen_produce_one_session_open() -> No
     assert session_open.block_bytes == SYMBOL_BYTES
     assert [session.session_id for session in rig.shm.open_sessions()] == [SessionId("s-1")]
     assert rig.store.allocated == [("sub/dir/output.bin", FILE_SIZE)]
+
+
+async def test_handle_manifest_seen_persists_the_spec_for_recovery() -> None:
+    rig = _rig()
+    await rig.authority.start()
+
+    await rig.authority.handle_manifest_seen(_manifest_seen("s-1"))
+
+    saved = rig.spec_store.load(SessionId("s-1"))
+    assert saved is not None
+    assert saved.relpath == "sub/dir/output.bin"
+    assert saved.total_blocks == TOTAL_BLOCKS
 
 
 async def test_a_second_authority_refuses_to_start_while_the_lock_is_held() -> None:
@@ -138,9 +155,10 @@ async def test_start_with_no_prior_segment_creates_it_clean() -> None:
 
 async def test_adopting_a_live_segment_leaves_its_bytes_intact_and_recovers_sessions() -> None:
     shared_shm = FakeShm(probe_receiver_alive=lambda: alive[0])
+    shared_spec_store = FakeSessionSpecStore()
     alive = [False]
 
-    first = _rig(shm=shared_shm)
+    first = _rig(shm=shared_shm, spec_store=shared_spec_store)
     await first.authority.start()
     await first.authority.handle_manifest_seen(_manifest_seen("s-1"))
     shared_shm.mark_block_decoded(SessionId("s-1"), BlockId(0))
@@ -151,7 +169,7 @@ async def test_adopting_a_live_segment_leaves_its_bytes_intact_and_recovers_sess
     alive[0] = True
     recovering_journal = FakeJournal()
     recovering_journal.preload(SessionId("s-1"), [BlockId(0), BlockId(2)])
-    second = _rig(shm=shared_shm, journal=recovering_journal)
+    second = _rig(shm=shared_shm, journal=recovering_journal, spec_store=shared_spec_store)
 
     await second.authority.start()
 
@@ -161,7 +179,33 @@ async def test_adopting_a_live_segment_leaves_its_bytes_intact_and_recovers_sess
     assert second.authority.recovered_blocks(SessionId("s-1")) == frozenset(
         {BlockId(0), BlockId(2)}
     )
+    recovered = {spec.session_id: spec for spec in second.authority.recovered_specs()}
+    assert recovered[SessionId("s-1")].relpath == "sub/dir/output.bin"
+    assert recovered[SessionId("s-1")].total_blocks == TOTAL_BLOCKS
 
+    await second.authority.handle_manifest_seen(_manifest_seen("s-1"))
+    assert second.broadcasts == []
+
+
+async def test_a_session_with_a_lost_spec_sidecar_recovers_blocks_but_not_the_spec() -> None:
+    shared_shm = FakeShm(probe_receiver_alive=lambda: alive[0])
+    shared_spec_store = FakeSessionSpecStore()
+    alive = [False]
+
+    first = _rig(shm=shared_shm, spec_store=shared_spec_store)
+    await first.authority.start()
+    await first.authority.handle_manifest_seen(_manifest_seen("s-1"))
+    shared_spec_store.drop(SessionId("s-1"))  # simulate a lost/corrupt sidecar
+
+    alive[0] = True
+    second = _rig(shm=shared_shm, spec_store=shared_spec_store)
+    await second.authority.start()
+
+    assert second.authority.recovered_blocks(SessionId("s-1")) == frozenset()
+    assert second.authority.recovered_specs() == ()
+
+    # Still treated as known -- a resent manifest must not re-init_session
+    # and zero a bitmap a live receiver is writing into.
     await second.authority.handle_manifest_seen(_manifest_seen("s-1"))
     assert second.broadcasts == []
 

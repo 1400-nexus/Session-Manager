@@ -15,6 +15,7 @@ from session_manager.adapters.asyncio_process_spawner import AsyncioProcessSpawn
 from session_manager.adapters.blake3_hasher import Blake3Hasher
 from session_manager.adapters.constants import SHM_SESSION_TABLE_BYTES, SHM_SESSION_TABLE_OFFSET
 from session_manager.adapters.errors import LockHeldError
+from session_manager.adapters.json_session_spec_store import JsonSessionSpecStore
 from session_manager.adapters.local_file_store import LocalFileStore
 from session_manager.adapters.posix_shm import PosixShm
 from session_manager.adapters.system_clock import SystemClock
@@ -214,6 +215,10 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
     spawner = AsyncioProcessSpawner()
     file_store = LocalFileStore(config.paths.staging_dir, config.paths.output_dir)
     journal = AppendJournal(config.paths.journal_dir)
+    # Sidecar next to the journal, not a wider shm session table: this file
+    # is Python-only, so it can carry the full SessionSpec without adding
+    # anything B's C++ receivers need to parse.
+    spec_store = JsonSessionSpecStore(config.paths.journal_dir)
     ipc = UdsIpcServer(config.paths.socket_path, expected_proto_hash=expected_proto_hash)
     file_lock = FlockFileLock(config.paths.lock_path)
     registry = ReceiverRegistry(clock, heartbeat_interval_s=HEARTBEAT_INTERVAL_SECONDS)
@@ -237,6 +242,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         shm=shm,
         file_store=file_store,
         journal=journal,
+        spec_store=spec_store,
         broadcast=broadcast,
         shm_name=config.shm.name,
         arena_bytes=config.shm.arena_bytes,
@@ -254,20 +260,6 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         )
         return 1
 
-    if authority.adopted():
-        # Known gap: OpenSession (from the on-segment session table) carries
-        # only session_id/total_blocks/offsets, not the full SessionSpec
-        # (k/n/symbol_bytes/file_size/file_hash/relpath) needed to register
-        # a session with the aggregator. Recovered sessions are decoded
-        # (journal-replayed, bytes intact) but won't appear in the status
-        # display or be handed to the verifier until their SessionSpec is
-        # persisted or re-derived some other way -- deliberately out of
-        # scope here; see SHARED_CODE.md.
-        logger.warning(
-            "adopted_sessions_not_yet_tracked_by_aggregator",
-            session_ids=[session.session_id for session in shm.open_sessions()],
-        )
-
     verifier = IntegrityVerifier(hasher, file_store)
     publisher = Publisher(file_store)
     aggregator = ProgressAggregator(
@@ -279,6 +271,18 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         stall_timeout_s=config.aggregation.stall_timeout_s,
         shm_crosscheck=config.aggregation.shm_crosscheck,
     )
+
+    if authority.adopted():
+        # Seed the aggregator with every session the authority could fully
+        # recover (spec + decoded blocks) so an adopted transfer keeps
+        # verifying and publishing normally instead of quietly stalling
+        # until it times out. A session whose spec sidecar was itself lost
+        # is logged loudly by _recover() and stays untracked -- see
+        # SessionAuthority._recover.
+        for recovered_spec in authority.recovered_specs():
+            aggregator.register_session(
+                recovered_spec, decoded=authority.recovered_blocks(recovered_spec.session_id)
+            )
     status_display = StatusDisplay(
         Console(force_terminal=config.status.force_terminal),
         clock,

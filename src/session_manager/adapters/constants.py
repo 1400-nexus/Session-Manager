@@ -35,3 +35,8 @@ SHM_SESSION_ENTRY_FORMAT = f"<{SHM_SESSION_ID_BYTES}sQQQ"
 # Bytes reserved for the session table; per-session block-table and bitmap
 # regions start after it.
 SHM_SESSION_TABLE_BYTES = 4096
+
+# SessionSpec sidecar: one JSON file per session, next to its journal file.
+# Python-only (unlike the shm header/session table above, nothing in the
+# C++ receivers reads this), so it carries no wire-format constraints.
+SESSION_SPEC_FILENAME_SUFFIX = ".spec.json"

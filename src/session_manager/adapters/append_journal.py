@@ -15,6 +15,7 @@ from session_manager.adapters.constants import (
     JOURNAL_SYNC_BATCH_SIZE,
 )
 from session_manager.domain.ids import BlockId, SessionId
+from session_manager.domain.paths import is_unsafe_filename_component
 
 logger = structlog.get_logger(__name__)
 
@@ -132,10 +133,11 @@ class AppendJournal:
 
     def _path_for(self, session_id: SessionId) -> Path:
         # session_id becomes a filename here -- the same corrupting-link
-        # concern as a relpath (domain/paths.is_unsafe_relpath), just for a
-        # different field, so it gets its own check rather than trusting
-        # that nothing upstream ever forwards an unvalidated session_id.
-        if not session_id or "/" in session_id or "\\" in session_id or session_id in {".", ".."}:
+        # concern as a relpath, just for a different field (shared check:
+        # domain/paths.is_unsafe_filename_component), so it gets its own
+        # call rather than trusting that nothing upstream ever forwards an
+        # unvalidated session_id.
+        if is_unsafe_filename_component(session_id):
             raise ValueError(f"unsafe session_id for journal filename: {session_id!r}")
         return self._journal_dir / f"{session_id}{JOURNAL_FILENAME_SUFFIX}"
 

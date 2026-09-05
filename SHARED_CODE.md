@@ -254,18 +254,34 @@ constraint actually lives**: for each in-range block id it calls
 append raises before any fold happens (`test_a_journal_append_failure_stops_
 that_block_reaching_the_aggregator` pins this).
 
-**Known gap, not fixed here:** `authority.adopted()` sessions are logged
-(`adopted_sessions_not_yet_tracked_by_aggregator`) but never registered with
-the aggregator. `ShmWriter.open_sessions()` returns `OpenSession`
-(session_id/total_blocks/offsets only) — not enough to rebuild a full
-`SessionSpec` (k/n/symbol_bytes/file_size/file_hash/relpath), which nothing
-currently persists durably. A receiver resending `ManifestSeen` after a
-restart won't help either: `handle_manifest_seen` treats a session already
-in `_known` (populated from `open_sessions()` on adopt) as a duplicate and
-no-ops. Recovered sessions are decoded correctly (bytes intact, journal
-replayed) but invisible to the status display and never reach the verifier
-until this is addressed — likely by persisting `SessionSpec` itself
-somewhere durable (the shm session table, or its own small file).
+**The adopted-sessions gap above is now fixed** (same day, before Step 13):
+`src/session_manager/adapters/json_session_spec_store.py`
+(`JsonSessionSpecStore`) persists the full `SessionSpec` as a JSON sidecar,
+one file per session, next to its journal file (`journal_dir/<session_id>
+.spec.json`) — a Python-only file, not a widened on-segment session table,
+so B's receivers never need to parse it. New port
+`ports/protocols.SessionSpecStore` (`save` / `load` / `delete`);
+`SessionAuthority` gained a `spec_store` constructor param, calls
+`spec_store.save(spec)` right after `init_session` succeeds in
+`handle_manifest_seen` (durable before the `SessionOpen` broadcast), and
+`_recover()` now calls `spec_store.load()` per adopted session, populating
+`recovered_specs()` alongside the existing `recovered_blocks()`. `main.py`
+wires `JsonSessionSpecStore(config.paths.journal_dir)` in and, after
+`authority.start()`, registers every `authority.recovered_specs()` result
+with the aggregator (`decoded=` from `recovered_blocks()`) — replacing the
+log-only gap warning entirely. A session whose sidecar is itself lost
+(corrupt JSON, missing field, deleted) logs
+`session_spec_missing_on_recovery` / `session_spec_corrupt` loudly and stays
+`_known` but unregistered, rather than either crashing or (worse)
+re-`init_session`-ing and zeroing a bitmap a live receiver is still writing
+into — decoded blocks and shm bytes are still safe, only verify/publish for
+that one session is lost.
+`domain/paths.py` gained `is_unsafe_filename_component`, factored out of
+`AppendJournal._path_for` (which now uses it too) so the "session_id becomes
+a filename" hazard has one check, not two independently-drifting copies.
+Fourth contract-test outing:
+`tests/integration/test_session_spec_store_contract.py` runs
+save/load/delete against `FakeSessionSpecStore` and `JsonSessionSpecStore`.
 
 **Windows dev-loop note:** `FlockFileLock` (`import fcntl`) is imported
 lazily inside `run()`, not at module scope, so `import session_manager.main`
