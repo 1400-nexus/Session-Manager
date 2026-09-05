@@ -147,6 +147,23 @@ without touching `staged`). `fake_file_store.py` gained `staged` tracking +
 `fail_next_publish`/`fail_next_quarantine`; `fake_hasher.py` gained
 `fail_next_compute_hash` (it had no failure injection at all before this).
 
+`src/session_manager/adapters/local_file_store.py` — `LocalFileStore`, the
+real `FileStore`. `publish` uses `os.replace`, never `shutil.move` (`move`
+falls back to non-atomic copy-then-delete across filesystems — exactly what
+the config-time `st_dev` check on staging/output exists to rule out), and
+refuses to overwrite an existing output file rather than silently clobbering
+a verified file with an unverified one. `allocate` reserves the full size
+with `os.posix_fallocate` where available, falling back to `truncate` on
+Windows (dev platform) or when the filesystem rejects fallocate — a sparse
+extent isn't the same guarantee, noted in the docstring. `quarantine` moves
+(never deletes) into a `quarantine/` subdirectory of staging.
+`tests/integration/test_file_store_contract.py` runs the same
+staged/published/quarantined state-machine assertions against `FakeFileStore`
+and `LocalFileStore` via a `Harness`, same pattern as the shm contract test;
+`tests/unit/test_local_file_store.py` covers what only the real adapter can
+prove — content survives the rename, the fallocate/truncate fallback, the
+overwrite refusal.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,

@@ -3,6 +3,9 @@ CHUNK_SIZE = 1048576
 # Enough to hold a pid written by FlockFileLock.
 LOCK_PID_READ_BYTES = 32
 
+STAGED_FILE_MODE = 0o644
+QUARANTINE_SUBDIR_NAME = "quarantine"
+
 # Shared-memory completion segment header. The C++ receivers parse these exact
 # bytes, so the format is a cross-language contract: explicit little-endian
 # and standard packing (no native alignment padding). See adapters/shm_layout.py.
