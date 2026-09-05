@@ -9,9 +9,9 @@ description = "Nexus RX-side session manager: aggregates receiver progress, veri
 requires-python = ">=3.11"
 dependencies = [
     "blake3",
-    "inotify-simple",
     "structlog",
     "protobuf",
+    "rich",
 ]
 
 [project.optional-dependencies]
@@ -45,10 +45,6 @@ strict = true
 mypy_path = "src"
 explicit_package_bases = true
 platform = "linux"
-
-[[tool.mypy.overrides]]
-module = "inotify_simple"
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["common_pb2", "net_pb2", "ipc_pb2", "rx_pb2"]

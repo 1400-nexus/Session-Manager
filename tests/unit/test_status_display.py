@@ -1,0 +1,173 @@
+import asyncio
+import io
+from collections.abc import Sequence
+
+from rich.console import Console
+
+from session_manager.domain.ids import BlockId, ReceiverId, SessionId
+from session_manager.domain.models import (
+    ReceiverCounters,
+    SessionSnapshot,
+    SessionSpec,
+    SessionState,
+)
+from session_manager.services.constants import LOSS_CRITICAL_PCT, LOSS_WARNING_PCT
+from session_manager.services.status_display import (
+    StatusDisplay,
+    _loss_style,
+    _prominent_if_nonzero,
+    render,
+)
+
+
+class _NeverResolvingClock:
+    def now(self) -> float:
+        return 0.0
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.get_running_loop().create_future()
+
+
+def _spec(session_id: str = "s-1", total_blocks: int = 4) -> SessionSpec:
+    return SessionSpec(
+        session_id=SessionId(session_id),
+        relpath="sub/file.bin",
+        file_size=1_000_000,
+        file_hash=b"\x00" * 32,
+        k=200,
+        n=255,
+        symbol_bytes=1400,
+        total_blocks=total_blocks,
+    )
+
+
+def _snapshot(
+    *,
+    session_id: str = "s-1",
+    total_blocks: int = 4,
+    blocks_decoded: int = 4,
+    state: SessionState = SessionState.COMPLETE,
+    observed_loss_pct: float = 0.0,
+    per_receiver: tuple[tuple[ReceiverId, ReceiverCounters], ...] = (),
+    live_receivers: frozenset[ReceiverId] = frozenset(),
+    missing_blocks: tuple[BlockId, ...] = (),
+    missing_block_count: int = 0,
+) -> SessionSnapshot:
+    return SessionSnapshot(
+        spec=_spec(session_id, total_blocks),
+        state=state,
+        blocks_decoded=blocks_decoded,
+        total_blocks=total_blocks,
+        observed_loss_pct=observed_loss_pct,
+        per_receiver=per_receiver,
+        live_receivers=live_receivers,
+        missing_blocks=missing_blocks,
+        missing_block_count=missing_block_count,
+    )
+
+
+def _rendered_text(snapshots: Sequence[SessionSnapshot], *, force_terminal: bool = False) -> str:
+    buffer = io.StringIO()
+    console = Console(file=buffer, width=120, force_terminal=force_terminal)
+    console.print(render(snapshots))
+    return buffer.getvalue()
+
+
+def test_render_with_no_sessions_shows_a_placeholder_with_no_terminal() -> None:
+    text = _rendered_text([])
+
+    assert "no active sessions" in text
+    assert "no receivers" in text
+
+
+def test_render_shows_a_complete_session() -> None:
+    snapshot = _snapshot(state=SessionState.COMPLETE, blocks_decoded=4, total_blocks=4)
+
+    text = _rendered_text([snapshot])
+
+    assert "s-1" in text
+    assert "COMPLETE" in text
+    assert "4/4" in text
+    assert "100.0%" in text
+
+
+def test_render_shows_a_stalled_session_with_its_missing_block_count() -> None:
+    snapshot = _snapshot(
+        state=SessionState.INCOMPLETE,
+        blocks_decoded=2,
+        total_blocks=5,
+        missing_blocks=(BlockId(1), BlockId(3), BlockId(4)),
+        missing_block_count=3,
+    )
+
+    text = _rendered_text([snapshot])
+
+    assert "INCOMPLETE" in text
+    assert "2/5" in text
+    assert "3" in text
+
+
+def test_render_shows_a_dead_receiver() -> None:
+    receiver_id = ReceiverId(2)
+    counters = ReceiverCounters(pkts_ok=100, crc_fail=3)
+    snapshot = _snapshot(per_receiver=((receiver_id, counters),), live_receivers=frozenset())
+
+    text = _rendered_text([snapshot])
+
+    assert "dead" in text
+
+
+def test_render_shows_an_alive_receiver() -> None:
+    receiver_id = ReceiverId(1)
+    snapshot = _snapshot(
+        per_receiver=((receiver_id, ReceiverCounters(pkts_ok=500)),),
+        live_receivers=frozenset({receiver_id}),
+    )
+
+    text = _rendered_text([snapshot])
+
+    assert "alive" in text
+
+
+def test_loss_style_escalates_at_the_configured_thresholds() -> None:
+    assert _loss_style(0.0) == "bold green"
+    assert _loss_style(LOSS_WARNING_PCT) == "bold yellow"
+    assert _loss_style(LOSS_CRITICAL_PCT) == "bold red"
+
+
+def test_crc_fail_kernel_drops_and_arena_exhausted_are_prominent_when_nonzero() -> None:
+    assert _prominent_if_nonzero(0).style == ""
+    assert _prominent_if_nonzero(7).style == "bold red"
+
+
+def test_render_emits_ansi_when_force_terminal_and_plain_text_otherwise() -> None:
+    snapshot = _snapshot(observed_loss_pct=20.0)
+
+    forced = _rendered_text([snapshot], force_terminal=True)
+    plain = _rendered_text([snapshot], force_terminal=False)
+
+    assert "\x1b[" in forced
+    assert "\x1b[" not in plain
+
+
+async def test_run_renders_immediately_then_blocks_until_cancelled() -> None:
+    render_calls = 0
+
+    def provider() -> Sequence[SessionSnapshot]:
+        nonlocal render_calls
+        render_calls += 1
+        return ()
+
+    console = Console(file=io.StringIO(), force_terminal=False, width=80)
+    display = StatusDisplay(
+        console, _NeverResolvingClock(), refresh_interval_s=5.0, snapshots_provider=provider
+    )
+
+    run_task = asyncio.create_task(display.run())
+    try:
+        await asyncio.sleep(0)
+        assert render_calls == 1
+        assert not run_task.done()
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)

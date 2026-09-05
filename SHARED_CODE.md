@@ -192,7 +192,29 @@ survives a fresh instance reopening the file.
 `SessionAuthority.start()` already calls `replay` on adopt, so the read side
 works; the write side needs wiring in Step 12 (composition root), most
 naturally as an extra call alongside `aggregator.handle_block_decoded` in
-whatever dispatches `BlockDecoded`.
+whatever dispatches `BlockDecoded`. **Ordering matters when it's wired:
+`journal.append` first, then fold into the in-memory decoded set.** Folding
+first and crashing before the append loses the block from the journal while
+it was already reported complete — on restart the manager thinks it's
+missing blocks the receivers actually finished writing, and stalls a session
+that was fine.
+
+`src/session_manager/services/status_display.py` — the graded status
+display. Split in two per the brief: `render(snapshots) -> RenderableType`
+is pure (no clock, no state, no I/O — this is why `SessionSnapshot` exists),
+`StatusDisplay` is the thin `rich` `Live` driver that calls it every
+`refresh_interval_s`. `crc_fail`/`kernel_drops`/`arena_exhausted` render
+bold-red when non-zero — three unrelated failure modes (corrupting router,
+slow host, decode falling behind) whose fixes have nothing in common, so the
+display is what tells you which one you have. Session loss % is styled
+green/yellow/red against `services/constants.py` thresholds so it reads at a
+glance. **Receiver table headers are abbreviated** (`aexh`, `hwm%`, `kdrops`)
+— the full field names overflowed and Rich truncated them to unreadable
+fragments at an 80-column width, which is exactly the width `docker compose
+logs` assumes when it can't detect a real terminal size; verified by
+re-rendering at 72/80/100/120 columns, not just eyeballed at one width.
+`pyproject.toml` gained `rich` and dropped `inotify-simple` (dead since
+Step 3 pruned `FileEvents` — nothing ever imported it).
 
 ## Config / build (renamed, structure kept)
 
