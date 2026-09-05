@@ -1,9 +1,353 @@
-def main() -> None:
-    raise SystemExit(
-        "session-manager: entrypoint not wired yet — this repo currently holds "
-        "only the Step 0 shared-code skeleton (see SHARED_CODE.md)"
+import asyncio
+import os
+import signal
+import sys
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import structlog
+from rich.console import Console
+
+from session_manager.adapters.append_journal import AppendJournal
+from session_manager.adapters.asyncio_process_spawner import AsyncioProcessSpawner
+from session_manager.adapters.blake3_hasher import Blake3Hasher
+from session_manager.adapters.constants import SHM_SESSION_TABLE_BYTES, SHM_SESSION_TABLE_OFFSET
+from session_manager.adapters.errors import LockHeldError
+from session_manager.adapters.local_file_store import LocalFileStore
+from session_manager.adapters.posix_shm import PosixShm
+from session_manager.adapters.system_clock import SystemClock
+from session_manager.config import AppConfig, load_config
+from session_manager.constants import (
+    CONFIG_ERROR_EXIT_CODE,
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_PROTO_CONTRACT_DIR,
+    NEXUS_CONFIG_ENV_VAR,
+    PROTO_CONTRACT_DIR_ENV_VAR,
+)
+from session_manager.domain.blocks import block_byte_range
+from session_manager.domain.ids import BlockId, ReceiverId, SessionId
+from session_manager.domain.models import SessionSnapshot
+from session_manager.ipc import codec, handshake
+from session_manager.ipc.constants import (
+    BLOCK_DECODED_FIELD_NAME,
+    HEARTBEAT_FIELD_NAME,
+    MANIFEST_SEEN_FIELD_NAME,
+    RECEIVER_HELLO_FIELD_NAME,
+    RECEIVER_STATS_FIELD_NAME,
+)
+from session_manager.ipc.uds import UdsIpcServer
+from session_manager.ports.protocols import IpcServer, Journal
+from session_manager.services.aggregator import ProgressAggregator
+from session_manager.services.authority import SessionAuthority
+from session_manager.services.constants import HEARTBEAT_INTERVAL_SECONDS
+from session_manager.services.publisher import Publisher
+from session_manager.services.receiver_registry import ReceiverRegistry
+from session_manager.services.status_display import StatusDisplay
+from session_manager.services.verifier import IntegrityVerifier
+from session_manager.supervision.supervisor import ChildSpec, ProcessSupervisor
+
+logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class DispatchContext:
+    registry: ReceiverRegistry
+    authority: SessionAuthority
+    aggregator: ProgressAggregator
+    journal: Journal
+
+
+IncomingMessageHandler = Callable[[DispatchContext, ReceiverId, Any], Awaitable[None]]
+
+
+async def _handle_receiver_hello(
+    context: DispatchContext, receiver_id: ReceiverId, message: Any
+) -> None:
+    context.registry.register(receiver_id)
+    logger.info("receiver_connected", receiver_id=receiver_id)
+
+
+async def _handle_heartbeat(
+    context: DispatchContext, receiver_id: ReceiverId, message: Any
+) -> None:
+    context.registry.refresh(receiver_id)
+
+
+async def _handle_manifest_seen(
+    context: DispatchContext, receiver_id: ReceiverId, message: Any
+) -> None:
+    await context.authority.handle_manifest_seen(message)
+
+
+async def _handle_receiver_stats(
+    context: DispatchContext, receiver_id: ReceiverId, message: Any
+) -> None:
+    context.aggregator.handle_receiver_stats(receiver_id, message)
+
+
+async def _handle_block_decoded(
+    context: DispatchContext, receiver_id: ReceiverId, message: Any
+) -> None:
+    session_id = SessionId(message.session_id)
+    spec = context.aggregator.spec_for(session_id)
+    if spec is not None:
+        for raw_block_id in message.block_ids:
+            if not 0 <= raw_block_id < spec.total_blocks:
+                continue
+            block_id = BlockId(raw_block_id)
+            offset, length = block_byte_range(spec, block_id)
+            # journal.append BEFORE folding into the aggregator's in-memory
+            # set: if that order were reversed and the process crashed
+            # between the two, the block would be reported complete but
+            # absent from the journal, and a restart would think it's
+            # missing bytes the receivers already finished writing.
+            context.journal.append(session_id, block_id, offset, length)
+    context.aggregator.handle_block_decoded(receiver_id, session_id, message.block_ids)
+
+
+INCOMING_MESSAGE_HANDLERS: dict[str, IncomingMessageHandler] = {
+    RECEIVER_HELLO_FIELD_NAME: _handle_receiver_hello,
+    HEARTBEAT_FIELD_NAME: _handle_heartbeat,
+    MANIFEST_SEEN_FIELD_NAME: _handle_manifest_seen,
+    RECEIVER_STATS_FIELD_NAME: _handle_receiver_stats,
+    BLOCK_DECODED_FIELD_NAME: _handle_block_decoded,
+}
+
+
+async def _run_incoming_dispatch_loop(ipc: IpcServer, context: DispatchContext) -> None:
+    async for receiver_id, raw in ipc.incoming():
+        field_name, message = codec.decode(raw)
+        handler = INCOMING_MESSAGE_HANDLERS.get(field_name)
+        if handler is None:
+            logger.warning(
+                "unknown_incoming_message_type", field_name=field_name, receiver_id=receiver_id
+            )
+            continue
+        await handler(context, receiver_id, message)
+
+
+def _make_on_complete(
+    verifier: IntegrityVerifier, publisher: Publisher
+) -> Callable[[SessionSnapshot], Awaitable[None]]:
+    async def on_complete(snapshot: SessionSnapshot) -> None:
+        try:
+            if await verifier.verify(snapshot.spec):
+                publisher.publish(snapshot.spec)
+            else:
+                publisher.quarantine(snapshot.spec)
+        except Exception as error:
+            # on_complete runs inside ProgressAggregator.poll(), inside the
+            # TaskGroup -- an unhandled exception here would propagate out
+            # of poll(), fail that task, and cancel every sibling task. One
+            # bad session must not take down the process.
+            logger.error(
+                "session_completion_failed",
+                session_id=snapshot.spec.session_id,
+                error=str(error),
+            )
+
+    return on_complete
+
+
+async def _cancel_workers_on_shutdown(
+    shutdown_event: asyncio.Event, worker_tasks: list[asyncio.Task[None]]
+) -> None:
+    await shutdown_event.wait()
+    logger.info("shutdown_in_progress")
+    for task in worker_tasks:
+        task.cancel()
+
+
+def _build_receiver_specs(config: AppConfig) -> list[ChildSpec]:
+    return [
+        ChildSpec(
+            name=f"receiver-{index}",
+            argv=[
+                config.receivers.binary_path,
+                "--receiver-id",
+                str(index),
+                "--listen-port",
+                str(config.receivers.ports[index]),
+            ],
+        )
+        for index in range(config.receivers.count)
+    ]
+
+
+def _install_shutdown_signal_handlers(
+    loop: asyncio.AbstractEventLoop, trigger_shutdown: Callable[[], None]
+) -> None:
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, trigger_shutdown)
+        except NotImplementedError:
+            # Windows: asyncio event loops don't implement
+            # add_signal_handler at all. signal.signal() covers SIGINT
+            # there (Ctrl+C); its handler runs outside the loop, so hand
+            # off via call_soon_threadsafe rather than touching asyncio
+            # state directly from it.
+            signal.signal(sig, lambda *_args: loop.call_soon_threadsafe(trigger_shutdown))
+
+
+async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) -> int:
+    proto_dir = Path(os.environ.get(PROTO_CONTRACT_DIR_ENV_VAR, DEFAULT_PROTO_CONTRACT_DIR))
+    if not proto_dir.is_dir():
+        logger.error(
+            "proto_contract_missing",
+            proto_dir=str(proto_dir),
+            hint="the nexus-proto submodule may not be initialised — "
+            "run: git submodule update --init",
+        )
+        return 1
+    expected_proto_hash = handshake.compute_proto_hash(proto_dir)
+
+    # Imported here, not at module scope: fcntl (and so this whole adapter
+    # module) does not exist on Windows, and importing session_manager.main
+    # is otherwise platform-independent -- useful for testing everything in
+    # this file except an actual run() on a non-POSIX dev box.
+    from session_manager.adapters.flock_file_lock import FlockFileLock
+
+    clock = SystemClock()
+    hasher = Blake3Hasher()
+    spawner = AsyncioProcessSpawner()
+    file_store = LocalFileStore(config.paths.staging_dir, config.paths.output_dir)
+    journal = AppendJournal(config.paths.journal_dir)
+    ipc = UdsIpcServer(config.paths.socket_path, expected_proto_hash=expected_proto_hash)
+    file_lock = FlockFileLock(config.paths.lock_path)
+    registry = ReceiverRegistry(clock, heartbeat_interval_s=HEARTBEAT_INTERVAL_SECONDS)
+    shm = PosixShm(slot_bytes=config.shm.slot_bytes, probe_receiver_alive=registry.any_alive)
+
+    async def broadcast(payload: bytes) -> None:
+        for receiver_id in registry.active_receivers():
+            try:
+                await ipc.send(receiver_id, payload)
+            except Exception as error:
+                logger.error(
+                    "session_open_broadcast_failed", receiver_id=receiver_id, error=str(error)
+                )
+
+    # Session regions are allocated after the session table, which starts
+    # right after the header (see adapters/shm_layout.py) -- the authority
+    # owns this allocation policy, ShmWriter.init_session just takes offsets.
+    session_region_base = SHM_SESSION_TABLE_OFFSET + SHM_SESSION_TABLE_BYTES
+    authority = SessionAuthority(
+        file_lock=file_lock,
+        shm=shm,
+        file_store=file_store,
+        journal=journal,
+        broadcast=broadcast,
+        shm_name=config.shm.name,
+        arena_bytes=config.shm.arena_bytes,
+        session_region_base=session_region_base,
     )
+
+    # The flock (inside authority.start(), before create_or_adopt) is
+    # acquired before anything else touches shm -- two managers on one
+    # segment is the worst bug available here.
+    try:
+        await authority.start()
+    except LockHeldError as error:
+        logger.error(
+            "lock_held_by_another_process", path=str(error.path), holder_pid=error.holder_pid
+        )
+        return 1
+
+    if authority.adopted():
+        # Known gap: OpenSession (from the on-segment session table) carries
+        # only session_id/total_blocks/offsets, not the full SessionSpec
+        # (k/n/symbol_bytes/file_size/file_hash/relpath) needed to register
+        # a session with the aggregator. Recovered sessions are decoded
+        # (journal-replayed, bytes intact) but won't appear in the status
+        # display or be handed to the verifier until their SessionSpec is
+        # persisted or re-derived some other way -- deliberately out of
+        # scope here; see SHARED_CODE.md.
+        logger.warning(
+            "adopted_sessions_not_yet_tracked_by_aggregator",
+            session_ids=[session.session_id for session in shm.open_sessions()],
+        )
+
+    verifier = IntegrityVerifier(hasher, file_store)
+    publisher = Publisher(file_store)
+    aggregator = ProgressAggregator(
+        clock=clock,
+        shm_reader=shm,
+        on_complete=_make_on_complete(verifier, publisher),
+        live_receivers=registry.active_receivers,
+        poll_interval_s=config.aggregation.poll_interval_s,
+        stall_timeout_s=config.aggregation.stall_timeout_s,
+        shm_crosscheck=config.aggregation.shm_crosscheck,
+    )
+    status_display = StatusDisplay(
+        Console(force_terminal=config.status.force_terminal),
+        clock,
+        config.status.refresh_interval_s,
+        snapshots_provider=aggregator.snapshots,
+    )
+    supervisor = ProcessSupervisor(_build_receiver_specs(config), spawner, clock)
+    context = DispatchContext(
+        registry=registry, authority=authority, aggregator=aggregator, journal=journal
+    )
+
+    loop = asyncio.get_running_loop()
+    shutdown_event = shutdown_event if shutdown_event is not None else asyncio.Event()
+
+    def trigger_shutdown() -> None:
+        logger.info("shutdown_signal_received")
+        shutdown_event.set()
+
+    _install_shutdown_signal_handlers(loop, trigger_shutdown)
+
+    exit_code = 0
+    clean_shutdown = True
+    try:
+        async with asyncio.TaskGroup() as task_group:
+            worker_tasks = [
+                task_group.create_task(ipc.serve()),
+                task_group.create_task(supervisor.run()),
+                task_group.create_task(_run_incoming_dispatch_loop(ipc, context)),
+                task_group.create_task(aggregator.run()),
+                task_group.create_task(status_display.run()),
+            ]
+            task_group.create_task(_cancel_workers_on_shutdown(shutdown_event, worker_tasks))
+            await asyncio.sleep(0)
+            logger.info(
+                "session_manager_listening",
+                socket_path=str(config.paths.socket_path),
+                shm_name=config.shm.name,
+                adopted=authority.adopted(),
+            )
+    except* asyncio.CancelledError:
+        pass  # defensive: normal shutdown exits the block above without raising
+    except* Exception as exception_group:
+        for task_error in exception_group.exceptions:
+            logger.error("task_failed", error=str(task_error))
+        exit_code = 1
+        clean_shutdown = False
+
+    await supervisor.shutdown()
+    journal.sync()
+    config.paths.socket_path.unlink(missing_ok=True)
+    # authority.shutdown() closes shm (unlink only if this was a clean exit,
+    # so a surviving receiver keeps its mapping on a crash path) and then
+    # releases the lock, in that order -- it is the sole owner of both, so
+    # main.py doesn't reach around it to interleave the socket unlink
+    # between the two.
+    authority.shutdown(clean=clean_shutdown)
+
+    return exit_code
+
+
+def main() -> int:
+    config_path = Path(os.environ.get(NEXUS_CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH))
+    try:
+        config = load_config(config_path)
+    except (ValueError, OSError) as error:
+        logger.error("invalid_config", config_path=str(config_path), error=str(error))
+        return CONFIG_ERROR_EXIT_CODE
+    return asyncio.run(run(config))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

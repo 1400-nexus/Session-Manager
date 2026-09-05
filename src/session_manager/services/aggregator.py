@@ -106,8 +106,12 @@ class ProgressAggregator:
         if len(progress.decoded) > before:
             progress.last_progress_at = self._clock.now()
 
-    def handle_receiver_stats(self, stats: Any) -> None:
-        self._receiver_counters[ReceiverId(stats.receiver_id)] = _stats_to_counters(stats)
+    def handle_receiver_stats(self, receiver_id: ReceiverId, stats: Any) -> None:
+        # receiver_id comes from the caller (the UDS connection the
+        # handshake already verified), never from stats.receiver_id --
+        # the same "trust the connection, not the payload" rule
+        # handle_block_decoded already follows.
+        self._receiver_counters[receiver_id] = _stats_to_counters(stats)
 
     async def poll(self) -> None:
         now = self._clock.now()
@@ -118,6 +122,13 @@ class ProgressAggregator:
 
     def snapshot_for(self, session_id: SessionId) -> SessionSnapshot | None:
         return self._snapshots.get(session_id)
+
+    def snapshots(self) -> tuple[SessionSnapshot, ...]:
+        return tuple(self._snapshots.values())
+
+    def spec_for(self, session_id: SessionId) -> SessionSpec | None:
+        progress = self._sessions.get(session_id)
+        return progress.spec if progress is not None else None
 
     async def run(self) -> None:
         while True:

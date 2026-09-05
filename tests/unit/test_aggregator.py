@@ -203,7 +203,7 @@ async def test_receiver_stats_land_in_the_snapshot() -> None:
     rig.aggregator.register_session(spec)
 
     rig.aggregator.handle_receiver_stats(
-        _stats(1, pkts_ok=500, crc_fail=7, arena_high_water_pct=42)
+        R1, _stats(1, pkts_ok=500, crc_fail=7, arena_high_water_pct=42)
     )
     await rig.aggregator.poll()
 
@@ -225,3 +225,30 @@ async def test_recovered_blocks_seed_a_session_on_registration() -> None:
     await rig.aggregator.poll()
 
     assert len(rig.completed) == 1
+
+
+def test_spec_for_returns_the_registered_spec() -> None:
+    rig = _rig(shm_crosscheck=False)
+    spec = _spec(total_blocks=3)
+    rig.aggregator.register_session(spec)
+
+    assert rig.aggregator.spec_for(spec.session_id) is spec
+
+
+def test_spec_for_an_unknown_session_is_none() -> None:
+    rig = _rig(shm_crosscheck=False)
+
+    assert rig.aggregator.spec_for(SessionId("ghost")) is None
+
+
+async def test_snapshots_returns_every_session_after_a_poll() -> None:
+    rig = _rig(shm_crosscheck=False)
+    spec_a = _spec("s-1", total_blocks=3)
+    spec_b = _spec("s-2", total_blocks=3)
+    rig.aggregator.register_session(spec_a)
+    rig.aggregator.register_session(spec_b)
+
+    await rig.aggregator.poll()
+
+    session_ids = {snapshot.spec.session_id for snapshot in rig.aggregator.snapshots()}
+    assert session_ids == {spec_a.session_id, spec_b.session_id}

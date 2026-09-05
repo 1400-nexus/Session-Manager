@@ -216,6 +216,67 @@ re-rendering at 72/80/100/120 columns, not just eyeballed at one width.
 `pyproject.toml` gained `rich` and dropped `inotify-simple` (dead since
 Step 3 pruned `FileEvents` — nothing ever imported it).
 
+`src/session_manager/main.py` — the composition root. The only file that
+imports both adapters and services. Startup order: proto-hash check →
+construct adapters → `authority.start()` (flock, then `create_or_adopt`,
+before anything else touches shm) → five tasks under one `TaskGroup`
+(`ipc.serve`, `supervisor.run`, the dispatch loop, `aggregator.run`,
+`status_display.run`) → log listening. Shutdown via an `asyncio.Event` set
+from a signal handler plus a small watcher task that cancels the five
+workers — never self-cancellation, copied from `file-monitor`'s `main.py`
+(which really did have this bug once). `run()` takes an optional
+`shutdown_event` param so a test can trigger shutdown directly instead of
+sending a real OS signal.
+
+Small additions made while wiring, not deferred to a later step:
+- `services/receiver_registry.py` (`ReceiverRegistry`) — new; mirrors
+  file-monitor's `SenderRegistry` exactly (three missed heartbeats, not
+  one). `active_receivers` doubles as `ProgressAggregator`'s
+  `live_receivers` callable; `any_alive` as `PosixShm`'s
+  `probe_receiver_alive` — "does a receiver answer on the socket" is
+  literally what this registry tracks.
+- `domain/blocks.py` (`block_byte_range`) — `BlockDecoded` carries only a
+  `block_id`, never a byte range, so the journal needs this pure helper to
+  recompute `(offset, length)` from the spec before it can append.
+- `ProgressAggregator.spec_for()` and `.snapshots()` — the dispatch loop
+  needs the former to compute journal offsets for `block_decoded`; the
+  status display needs the latter to enumerate all sessions. Both trivial,
+  additive, `snapshots()` returns a tuple over the internal dict's values.
+- `ProgressAggregator.handle_receiver_stats` now takes `receiver_id`
+  explicitly instead of reading `stats.receiver_id` — a real inconsistency
+  in the Step 7 code, caught while wiring: `handle_block_decoded` already
+  trusted the connection's verified identity, not the payload; stats was
+  the odd one out.
+
+**The dispatch loop's `block_decoded` handler is where the Step 10 ordering
+constraint actually lives**: for each in-range block id it calls
+`journal.append` before `aggregator.handle_block_decoded`, and a failed
+append raises before any fold happens (`test_a_journal_append_failure_stops_
+that_block_reaching_the_aggregator` pins this).
+
+**Known gap, not fixed here:** `authority.adopted()` sessions are logged
+(`adopted_sessions_not_yet_tracked_by_aggregator`) but never registered with
+the aggregator. `ShmWriter.open_sessions()` returns `OpenSession`
+(session_id/total_blocks/offsets only) — not enough to rebuild a full
+`SessionSpec` (k/n/symbol_bytes/file_size/file_hash/relpath), which nothing
+currently persists durably. A receiver resending `ManifestSeen` after a
+restart won't help either: `handle_manifest_seen` treats a session already
+in `_known` (populated from `open_sessions()` on adopt) as a duplicate and
+no-ops. Recovered sessions are decoded correctly (bytes intact, journal
+replayed) but invisible to the status display and never reach the verifier
+until this is addressed — likely by persisting `SessionSpec` itself
+somewhere durable (the shm session table, or its own small file).
+
+**Windows dev-loop note:** `FlockFileLock` (`import fcntl`) is imported
+lazily inside `run()`, not at module scope, so `import session_manager.main`
+— and everything in it except an actual `run()` call — stays testable on a
+non-POSIX box. `python -m session_manager.main` with no config present
+confirms this: clean `invalid_config` log, exit 78, no traceback, on
+Windows. `tests/integration/test_main_composition.py` is the real end-to-end
+check (lock/segment/socket lifecycle) and is POSIX-only
+(`pytest.importorskip("fcntl")`), same as the UDS and flock integration
+tests.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,
