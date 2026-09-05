@@ -55,6 +55,14 @@ async def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> No
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
+def _segment_exists(name: str) -> bool:
+    try:
+        shared_memory.SharedMemory(name=name, create=False).close()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 async def test_run_acquires_lock_creates_segment_binds_socket_and_shuts_down_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -65,6 +73,12 @@ async def test_run_acquires_lock_creates_segment_binds_socket_and_shuts_down_cle
     run_task = asyncio.create_task(main_module.run(config, shutdown_event=shutdown_event))
     try:
         await _wait_until(lambda: config.paths.socket_path.exists())
+        # The socket binds and starts accepting connections before
+        # authority.start() runs (main.py waits out ADOPT_GRACE_PERIOD_SECONDS
+        # for a reconnecting receiver first), so the segment shows up later
+        # than the socket -- wait for it rather than assuming they're
+        # simultaneous.
+        await _wait_until(lambda: _segment_exists(config.shm.name))
 
         # the segment exists and the lock is held while running
         shared_memory.SharedMemory(name=config.shm.name, create=False).close()

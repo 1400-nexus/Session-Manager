@@ -1,6 +1,6 @@
 import asyncio
-import dataclasses
 import signal
+from pathlib import Path
 from typing import Any
 
 import common_pb2
@@ -9,8 +9,9 @@ import pytest
 import rx_pb2
 from structlog.testing import capture_logs
 
+from session_manager.adapters.system_clock import SystemClock
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
-from session_manager.domain.models import SessionSnapshot, SessionSpec, SessionState
+from session_manager.domain.models import SessionSpec
 from session_manager.ipc import codec
 from session_manager.main import (
     DispatchContext,
@@ -22,18 +23,16 @@ from session_manager.main import (
     _handle_receiver_hello,
     _handle_receiver_stats,
     _install_shutdown_signal_handlers,
-    _make_on_complete,
     _run_incoming_dispatch_loop,
+    _wait_for_a_receiver_or_timeout,
+    _wait_for_path,
 )
 from session_manager.services.aggregator import ProgressAggregator
 from session_manager.services.authority import SessionAuthority
-from session_manager.services.publisher import Publisher
 from session_manager.services.receiver_registry import ReceiverRegistry
-from session_manager.services.verifier import IntegrityVerifier
 from tests.fakes.fake_clock import FakeClock
 from tests.fakes.fake_file_lock import FakeFileLock
 from tests.fakes.fake_file_store import FakeFileStore
-from tests.fakes.fake_hasher import FakeHasher
 from tests.fakes.fake_ipc_server import FakeIpcServer
 from tests.fakes.fake_journal import FakeJournal
 from tests.fakes.fake_session_spec_store import FakeSessionSpecStore
@@ -42,7 +41,6 @@ from tests.fakes.fake_shm import FakeShm
 ARENA_BYTES = 1 << 20
 REGION_BASE = 8192
 SESSION = SessionId("s-1")
-MATCHING_DIGEST_HEX = "ab" * 32
 
 
 def _spec(*, total_blocks: int = 4) -> SessionSpec:
@@ -59,7 +57,10 @@ def _spec(*, total_blocks: int = 4) -> SessionSpec:
 
 
 def _context(
-    *, registry: ReceiverRegistry | None = None, journal: FakeJournal | None = None
+    *,
+    registry: ReceiverRegistry | None = None,
+    journal: FakeJournal | None = None,
+    ready: asyncio.Event | None = None,
 ) -> tuple[DispatchContext, FakeClock, FakeShm, ProgressAggregator, FakeJournal]:
     clock = FakeClock()
     registry = registry or ReceiverRegistry(clock, heartbeat_interval_s=5.0)
@@ -90,8 +91,14 @@ def _context(
         arena_bytes=ARENA_BYTES,
         session_region_base=REGION_BASE,
     )
+    if ready is None:
+        # Pre-set by default: most of these tests call handlers directly and
+        # don't care about run()'s startup gate. Tests of the gate itself
+        # pass an unset Event explicitly.
+        ready = asyncio.Event()
+        ready.set()
     context = DispatchContext(
-        registry=registry, authority=authority, aggregator=aggregator, journal=journal
+        registry=registry, authority=authority, aggregator=aggregator, journal=journal, ready=ready
     )
     return context, clock, shm, aggregator, journal
 
@@ -235,62 +242,6 @@ async def test_dispatch_loop_warns_and_continues_on_an_unhandled_message_type() 
         await asyncio.gather(loop_task, return_exceptions=True)
 
 
-async def test_on_complete_publishes_a_matching_session() -> None:
-    hasher = FakeHasher(digest=MATCHING_DIGEST_HEX)
-    store = FakeFileStore()
-    store.staged.add("sub/file.bin")
-    on_complete = _make_on_complete(IntegrityVerifier(hasher, store), Publisher(store))
-    spec = _spec_with_hash(bytes.fromhex(MATCHING_DIGEST_HEX))
-
-    await on_complete(_snapshot_for(spec))
-
-    assert store.published == ["sub/file.bin"]
-    assert store.quarantined == []
-
-
-async def test_on_complete_quarantines_a_mismatch_and_never_raises() -> None:
-    hasher = FakeHasher(digest=MATCHING_DIGEST_HEX)
-    store = FakeFileStore()
-    store.staged.add("sub/file.bin")
-    on_complete = _make_on_complete(IntegrityVerifier(hasher, store), Publisher(store))
-    spec = _spec_with_hash(bytes.fromhex("ff" * 32))  # does not match hasher's digest
-
-    await on_complete(_snapshot_for(spec))
-
-    assert store.quarantined == ["sub/file.bin"]
-    assert store.published == []
-
-
-async def test_on_complete_guards_against_a_hashing_failure() -> None:
-    hasher = FakeHasher()
-    hasher.fail_next_compute_hash(OSError("read error"))
-    store = FakeFileStore()
-    on_complete = _make_on_complete(IntegrityVerifier(hasher, store), Publisher(store))
-
-    with capture_logs() as logs:
-        await on_complete(_snapshot_for(_spec()))  # must not raise
-
-    assert any(entry["event"] == "session_completion_failed" for entry in logs)
-
-
-def _spec_with_hash(file_hash: bytes) -> SessionSpec:
-    return dataclasses.replace(_spec(), file_hash=file_hash)
-
-
-def _snapshot_for(spec: SessionSpec) -> SessionSnapshot:
-    return SessionSnapshot(
-        spec=spec,
-        state=SessionState.COMPLETE,
-        blocks_decoded=spec.total_blocks,
-        total_blocks=spec.total_blocks,
-        observed_loss_pct=0.0,
-        per_receiver=(),
-        live_receivers=frozenset(),
-        missing_blocks=(),
-        missing_block_count=0,
-    )
-
-
 async def test_cancel_workers_on_shutdown_cancels_every_task() -> None:
     shutdown_event = asyncio.Event()
 
@@ -321,8 +272,6 @@ def test_install_shutdown_signal_handlers_falls_back_when_unsupported(
 
 
 def test_build_receiver_specs_one_per_configured_receiver() -> None:
-    from pathlib import Path
-
     from session_manager.config import (
         AggregationConfig,
         AppConfig,
@@ -356,6 +305,107 @@ def test_build_receiver_specs_one_per_configured_receiver() -> None:
     assert [spec.name for spec in specs] == ["receiver-0", "receiver-1"]
     assert specs[0].argv == ["./bin/rx", "--receiver-id", "0", "--listen-port", "9100"]
     assert specs[1].argv == ["./bin/rx", "--receiver-id", "1", "--listen-port", "9101"]
+
+
+async def test_handle_manifest_seen_waits_for_ready_before_touching_the_authority() -> None:
+    ready = asyncio.Event()
+    context, _clock, shm, _aggregator, _journal = _context(ready=ready)
+    await context.authority.start()
+    manifest_seen = rx_pb2.ManifestSeen(
+        receiver_id=1,
+        manifest=common_pb2.Manifest(
+            session_id=str(SESSION),
+            filepath="sub/file.bin",
+            file_size=1_120_000,
+            file_hash=b"\x00" * 32,
+            k=200,
+            n=255,
+            block_bytes=1400,
+            total_blocks=4,
+        ),
+    )
+
+    handler_task = asyncio.create_task(_handle_manifest_seen(context, ReceiverId(1), manifest_seen))
+    await asyncio.sleep(0)
+    assert shm.open_sessions() == ()  # still waiting, ready not set yet
+
+    ready.set()
+    await asyncio.wait_for(handler_task, timeout=1.0)
+
+    assert [session.session_id for session in shm.open_sessions()] == [SESSION]
+
+
+async def test_block_decoded_waits_for_ready_before_journaling() -> None:
+    ready = asyncio.Event()
+    context, _clock, _shm, aggregator, journal = _context(ready=ready)
+    aggregator.register_session(_spec(total_blocks=4))
+    message = rx_pb2.BlockDecoded(session_id=str(SESSION), receiver_id=1, block_ids=[0, 2])
+
+    handler_task = asyncio.create_task(_handle_block_decoded(context, ReceiverId(1), message))
+    await asyncio.sleep(0)
+    assert [block_id async for block_id in journal.replay(SESSION)] == []  # still waiting
+
+    ready.set()
+    await asyncio.wait_for(handler_task, timeout=1.0)
+
+    assert [block_id async for block_id in journal.replay(SESSION)] == [BlockId(0), BlockId(2)]
+
+
+async def test_receiver_hello_and_heartbeat_are_never_gated_by_ready() -> None:
+    ready = asyncio.Event()  # deliberately never set
+    context, _clock, _shm, _aggregator, _journal = _context(ready=ready)
+
+    await asyncio.wait_for(
+        _handle_receiver_hello(context, ReceiverId(1), rx_pb2.ReceiverHello(receiver_id=1)),
+        timeout=1.0,
+    )
+    await asyncio.wait_for(
+        _handle_heartbeat(context, ReceiverId(1), ipc_pb2.Heartbeat()), timeout=1.0
+    )
+
+    assert context.registry.active_receivers() == frozenset({ReceiverId(1)})
+
+
+async def test_wait_for_path_returns_once_the_path_exists(tmp_path: Path) -> None:
+    # A real clock, not FakeClock: FakeClock.sleep() advances time and returns
+    # without ever suspending, so a loop built on it never yields back to this
+    # test to call target.touch() -- only a clock backed by real asyncio.sleep
+    # lets the two coroutines interleave.
+    clock = SystemClock()
+    target = tmp_path / "socket"
+
+    wait_task = asyncio.create_task(_wait_for_path(target, clock, poll_interval_s=0.01))
+    await asyncio.sleep(0.03)
+    assert not wait_task.done()
+
+    target.touch()
+    await asyncio.wait_for(wait_task, timeout=1.0)
+
+
+async def test_wait_for_a_receiver_returns_immediately_once_alive() -> None:
+    clock = FakeClock()
+    registry = ReceiverRegistry(clock, heartbeat_interval_s=5.0)
+    registry.register(ReceiverId(1))
+
+    await asyncio.wait_for(
+        _wait_for_a_receiver_or_timeout(registry, clock, timeout_s=10.0, poll_interval_s=0.01),
+        timeout=1.0,
+    )
+
+
+async def test_wait_for_a_receiver_gives_up_when_nobody_reconnects() -> None:
+    # FakeClock.sleep() advances time synchronously, so this loop's own polling
+    # drives the clock past the deadline and returns without any external
+    # advance() call or real elapsed time.
+    clock = FakeClock()
+    registry = ReceiverRegistry(clock, heartbeat_interval_s=5.0)
+
+    await asyncio.wait_for(
+        _wait_for_a_receiver_or_timeout(registry, clock, timeout_s=1.0, poll_interval_s=0.1),
+        timeout=1.0,
+    )
+
+    assert not registry.any_alive()
 
 
 async def _wait_until(predicate: Any, timeout: float = 1.0) -> None:

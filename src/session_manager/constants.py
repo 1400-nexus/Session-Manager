@@ -13,6 +13,13 @@ DEFAULT_CONFIG_PATH = "config.toml"
 PROTO_CONTRACT_DIR_ENV_VAR = "NEXUS_PROTO_CONTRACT_DIR"
 DEFAULT_PROTO_CONTRACT_DIR = "libs/nexus-proto/proto"
 
+# How long main.py lets a reconnecting receiver say ReceiverHello before
+# create_or_adopt decides whether anyone is alive. Fixed, not configurable
+# yet: it only matters on the adopt path (a segment already exists), and a
+# short bounded wait at startup is a one-time cost, not a steady-state one.
+ADOPT_GRACE_PERIOD_SECONDS = 1.5
+STARTUP_POLL_INTERVAL_SECONDS = 0.05
+
 PATHS_SECTION = "paths"
 SHM_SECTION = "shm"
 AGGREGATION_SECTION = "aggregation"

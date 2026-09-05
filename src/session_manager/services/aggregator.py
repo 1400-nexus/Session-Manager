@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable, Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import structlog
@@ -24,6 +24,13 @@ logger = structlog.get_logger(__name__)
 
 OnComplete = Callable[[SessionSnapshot], Awaitable[None]]
 LiveReceivers = Callable[[], frozenset[ReceiverId]]
+
+# Once a session reaches one of these, poll() must stop rebuilding its
+# snapshot from is_complete()/is_stalled() -- that logic only ever produces
+# OPEN/COMPLETE/INCOMPLETE, so recomputing after mark_verified/
+# mark_hash_mismatch would silently revert a terminal outcome back to
+# COMPLETE on the very next poll.
+_TERMINAL_STATES = frozenset({SessionState.VERIFIED, SessionState.HASH_MISMATCH})
 
 
 def _stats_to_counters(stats: Any) -> ReceiverCounters:
@@ -116,6 +123,8 @@ class ProgressAggregator:
     async def poll(self) -> None:
         now = self._clock.now()
         for session_id, progress in list(self._sessions.items()):
+            if progress.state in _TERMINAL_STATES:
+                continue
             snapshot = self._build_snapshot(session_id, progress, now)
             self._snapshots[session_id] = snapshot
             await self._act_on(progress, snapshot)
@@ -129,6 +138,27 @@ class ProgressAggregator:
     def spec_for(self, session_id: SessionId) -> SessionSpec | None:
         progress = self._sessions.get(session_id)
         return progress.spec if progress is not None else None
+
+    def mark_verified(self, session_id: SessionId) -> None:
+        """Record that `on_complete`'s verify+publish succeeded for this session.
+
+        Called by the composition root, never by `poll()` itself: only the
+        code that actually ran the verifier knows the outcome.
+        """
+        self._set_terminal_state(session_id, SessionState.VERIFIED)
+
+    def mark_hash_mismatch(self, session_id: SessionId) -> None:
+        """Record that `on_complete`'s verify failed and the file was quarantined."""
+        self._set_terminal_state(session_id, SessionState.HASH_MISMATCH)
+
+    def _set_terminal_state(self, session_id: SessionId, state: SessionState) -> None:
+        progress = self._sessions.get(session_id)
+        if progress is None:
+            return
+        progress.state = state
+        snapshot = self._snapshots.get(session_id)
+        if snapshot is not None:
+            self._snapshots[session_id] = replace(snapshot, state=state)
 
     async def run(self) -> None:
         while True:

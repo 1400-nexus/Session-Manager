@@ -252,3 +252,52 @@ async def test_snapshots_returns_every_session_after_a_poll() -> None:
 
     session_ids = {snapshot.spec.session_id for snapshot in rig.aggregator.snapshots()}
     assert session_ids == {spec_a.session_id, spec_b.session_id}
+
+
+async def test_mark_verified_sets_a_terminal_state_further_polls_do_not_revert() -> None:
+    rig = _rig(shm_crosscheck=False)
+    spec = _spec(total_blocks=3)
+    rig.aggregator.register_session(spec)
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1, 2])
+    await rig.aggregator.poll()
+    assert len(rig.completed) == 1
+
+    rig.aggregator.mark_verified(spec.session_id)
+
+    snapshot = rig.aggregator.snapshot_for(spec.session_id)
+    assert snapshot is not None
+    assert snapshot.state is SessionState.VERIFIED
+
+    await rig.aggregator.poll()  # must not rebuild the snapshot back to COMPLETE
+
+    snapshot_after = rig.aggregator.snapshot_for(spec.session_id)
+    assert snapshot_after is not None
+    assert snapshot_after.state is SessionState.VERIFIED
+    assert len(rig.completed) == 1
+
+
+async def test_mark_hash_mismatch_sets_a_terminal_state() -> None:
+    rig = _rig(shm_crosscheck=False)
+    spec = _spec(total_blocks=3)
+    rig.aggregator.register_session(spec)
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1, 2])
+    await rig.aggregator.poll()
+
+    rig.aggregator.mark_hash_mismatch(spec.session_id)
+
+    snapshot = rig.aggregator.snapshot_for(spec.session_id)
+    assert snapshot is not None
+    assert snapshot.state is SessionState.HASH_MISMATCH
+
+    await rig.aggregator.poll()  # must not rebuild the snapshot back to COMPLETE
+    snapshot_after = rig.aggregator.snapshot_for(spec.session_id)
+    assert snapshot_after is not None
+    assert snapshot_after.state is SessionState.HASH_MISMATCH
+
+
+def test_marking_an_unknown_session_verified_is_a_noop() -> None:
+    rig = _rig(shm_crosscheck=False)
+
+    rig.aggregator.mark_verified(SessionId("ghost"))  # must not raise
+
+    assert rig.aggregator.snapshot_for(SessionId("ghost")) is None

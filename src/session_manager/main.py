@@ -21,15 +21,16 @@ from session_manager.adapters.posix_shm import PosixShm
 from session_manager.adapters.system_clock import SystemClock
 from session_manager.config import AppConfig, load_config
 from session_manager.constants import (
+    ADOPT_GRACE_PERIOD_SECONDS,
     CONFIG_ERROR_EXIT_CODE,
     DEFAULT_CONFIG_PATH,
     DEFAULT_PROTO_CONTRACT_DIR,
     NEXUS_CONFIG_ENV_VAR,
     PROTO_CONTRACT_DIR_ENV_VAR,
+    STARTUP_POLL_INTERVAL_SECONDS,
 )
 from session_manager.domain.blocks import block_byte_range
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
-from session_manager.domain.models import SessionSnapshot
 from session_manager.ipc import codec, handshake
 from session_manager.ipc.constants import (
     BLOCK_DECODED_FIELD_NAME,
@@ -39,7 +40,7 @@ from session_manager.ipc.constants import (
     RECEIVER_STATS_FIELD_NAME,
 )
 from session_manager.ipc.uds import UdsIpcServer
-from session_manager.ports.protocols import IpcServer, Journal
+from session_manager.ports.protocols import Clock, IpcServer, Journal
 from session_manager.services.aggregator import ProgressAggregator
 from session_manager.services.authority import SessionAuthority
 from session_manager.services.constants import HEARTBEAT_INTERVAL_SECONDS
@@ -58,6 +59,12 @@ class DispatchContext:
     authority: SessionAuthority
     aggregator: ProgressAggregator
     journal: Journal
+    # Set once authority.start() has run. manifest_seen/block_decoded touch
+    # shm (via the authority/journal) and must wait for it; receiver_hello/
+    # heartbeat never touch shm and run immediately -- that asymmetry is
+    # what lets a receiver reconnect and register during the adopt grace
+    # window below, before create_or_adopt has even been called.
+    ready: asyncio.Event
 
 
 IncomingMessageHandler = Callable[[DispatchContext, ReceiverId, Any], Awaitable[None]]
@@ -79,6 +86,7 @@ async def _handle_heartbeat(
 async def _handle_manifest_seen(
     context: DispatchContext, receiver_id: ReceiverId, message: Any
 ) -> None:
+    await context.ready.wait()
     await context.authority.handle_manifest_seen(message)
 
 
@@ -91,6 +99,7 @@ async def _handle_receiver_stats(
 async def _handle_block_decoded(
     context: DispatchContext, receiver_id: ReceiverId, message: Any
 ) -> None:
+    await context.ready.wait()
     session_id = SessionId(message.session_id)
     spec = context.aggregator.spec_for(session_id)
     if spec is not None:
@@ -129,27 +138,23 @@ async def _run_incoming_dispatch_loop(ipc: IpcServer, context: DispatchContext) 
         await handler(context, receiver_id, message)
 
 
-def _make_on_complete(
-    verifier: IntegrityVerifier, publisher: Publisher
-) -> Callable[[SessionSnapshot], Awaitable[None]]:
-    async def on_complete(snapshot: SessionSnapshot) -> None:
-        try:
-            if await verifier.verify(snapshot.spec):
-                publisher.publish(snapshot.spec)
-            else:
-                publisher.quarantine(snapshot.spec)
-        except Exception as error:
-            # on_complete runs inside ProgressAggregator.poll(), inside the
-            # TaskGroup -- an unhandled exception here would propagate out
-            # of poll(), fail that task, and cancel every sibling task. One
-            # bad session must not take down the process.
-            logger.error(
-                "session_completion_failed",
-                session_id=snapshot.spec.session_id,
-                error=str(error),
-            )
+async def _wait_for_path(path: Path, clock: Clock, poll_interval_s: float) -> None:
+    while not path.exists():
+        await clock.sleep(poll_interval_s)
 
-    return on_complete
+
+async def _wait_for_a_receiver_or_timeout(
+    registry: ReceiverRegistry, clock: Clock, timeout_s: float, poll_interval_s: float
+) -> None:
+    # Only matters on the adopt path (a segment already exists from a
+    # previous run): a receiver whose connection just died in a crash needs
+    # a moment to notice and reconnect before create_or_adopt asks whether
+    # anyone is alive. Bounded, so a fresh start with no receivers waiting
+    # to reconnect doesn't hang -- it just spends this long doing nothing,
+    # once, at startup.
+    deadline = clock.now() + timeout_s
+    while not registry.any_alive() and clock.now() < deadline:
+        await clock.sleep(poll_interval_s)
 
 
 async def _cancel_workers_on_shutdown(
@@ -249,40 +254,43 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         session_region_base=session_region_base,
     )
 
-    # The flock (inside authority.start(), before create_or_adopt) is
-    # acquired before anything else touches shm -- two managers on one
-    # segment is the worst bug available here.
-    try:
-        await authority.start()
-    except LockHeldError as error:
-        logger.error(
-            "lock_held_by_another_process", path=str(error.path), holder_pid=error.holder_pid
-        )
-        return 1
-
     verifier = IntegrityVerifier(hasher, file_store)
     publisher = Publisher(file_store)
+
+    async def on_complete(snapshot: Any) -> None:
+        try:
+            if await verifier.verify(snapshot.spec):
+                publisher.publish(snapshot.spec)
+                aggregator.mark_verified(snapshot.spec.session_id)
+            else:
+                publisher.quarantine(snapshot.spec)
+                aggregator.mark_hash_mismatch(snapshot.spec.session_id)
+        except Exception as error:
+            # on_complete runs inside ProgressAggregator.poll(), inside the
+            # TaskGroup -- an unhandled exception here would propagate out
+            # of poll(), fail that task, and cancel every sibling task. One
+            # bad session must not take down the process.
+            logger.error(
+                "session_completion_failed",
+                session_id=snapshot.spec.session_id,
+                error=str(error),
+            )
+
+    # `aggregator` does not exist yet when `on_complete` is defined above --
+    # that's fine, `on_complete`'s body isn't executed until a session
+    # actually completes, by which point the assignment below has run.
+    # Constructing it here, ahead of authority.start(), is also what lets
+    # aggregator.run() and status_display.run() be created as ordinary
+    # TaskGroup tasks below rather than needing their own late-bound wiring.
     aggregator = ProgressAggregator(
         clock=clock,
         shm_reader=shm,
-        on_complete=_make_on_complete(verifier, publisher),
+        on_complete=on_complete,
         live_receivers=registry.active_receivers,
         poll_interval_s=config.aggregation.poll_interval_s,
         stall_timeout_s=config.aggregation.stall_timeout_s,
         shm_crosscheck=config.aggregation.shm_crosscheck,
     )
-
-    if authority.adopted():
-        # Seed the aggregator with every session the authority could fully
-        # recover (spec + decoded blocks) so an adopted transfer keeps
-        # verifying and publishing normally instead of quietly stalling
-        # until it times out. A session whose spec sidecar was itself lost
-        # is logged loudly by _recover() and stays untracked -- see
-        # SessionAuthority._recover.
-        for recovered_spec in authority.recovered_specs():
-            aggregator.register_session(
-                recovered_spec, decoded=authority.recovered_blocks(recovered_spec.session_id)
-            )
     status_display = StatusDisplay(
         Console(force_terminal=config.status.force_terminal),
         clock,
@@ -290,8 +298,14 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         snapshots_provider=aggregator.snapshots,
     )
     supervisor = ProcessSupervisor(_build_receiver_specs(config), spawner, clock)
+
+    authority_ready = asyncio.Event()
     context = DispatchContext(
-        registry=registry, authority=authority, aggregator=aggregator, journal=journal
+        registry=registry,
+        authority=authority,
+        aggregator=aggregator,
+        journal=journal,
+        ready=authority_ready,
     )
 
     loop = asyncio.get_running_loop()
@@ -307,21 +321,68 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
     clean_shutdown = True
     try:
         async with asyncio.TaskGroup() as task_group:
-            worker_tasks = [
-                task_group.create_task(ipc.serve()),
-                task_group.create_task(supervisor.run()),
-                task_group.create_task(_run_incoming_dispatch_loop(ipc, context)),
-                task_group.create_task(aggregator.run()),
-                task_group.create_task(status_display.run()),
-            ]
-            task_group.create_task(_cancel_workers_on_shutdown(shutdown_event, worker_tasks))
-            await asyncio.sleep(0)
-            logger.info(
-                "session_manager_listening",
-                socket_path=str(config.paths.socket_path),
-                shm_name=config.shm.name,
-                adopted=authority.adopted(),
+            # Bind the socket and start accepting connections immediately --
+            # a receiver reconnecting after a crash needs somewhere to say
+            # ReceiverHello before create_or_adopt (below) decides whether
+            # anyone is alive. manifest_seen/block_decoded wait on `ready`,
+            # so nothing actually touches shm before authority.start() runs.
+            ipc_task = task_group.create_task(ipc.serve())
+            dispatch_task = task_group.create_task(_run_incoming_dispatch_loop(ipc, context))
+
+            await _wait_for_path(config.paths.socket_path, clock, STARTUP_POLL_INTERVAL_SECONDS)
+            await _wait_for_a_receiver_or_timeout(
+                registry, clock, ADOPT_GRACE_PERIOD_SECONDS, STARTUP_POLL_INTERVAL_SECONDS
             )
+
+            lock_error: LockHeldError | None = None
+            try:
+                # flock (inside authority.start(), before create_or_adopt) is
+                # acquired before anything else touches shm -- two managers
+                # on one segment is the worst bug available here.
+                await authority.start()
+            except LockHeldError as error:
+                lock_error = error
+
+            if lock_error is not None:
+                logger.error(
+                    "lock_held_by_another_process",
+                    path=str(lock_error.path),
+                    holder_pid=lock_error.holder_pid,
+                )
+                exit_code = 1
+                ipc_task.cancel()
+                dispatch_task.cancel()
+            else:
+                authority_ready.set()
+
+                if authority.adopted():
+                    # Seed the aggregator with every session the authority
+                    # could fully recover (spec + decoded blocks) so an
+                    # adopted transfer keeps verifying and publishing
+                    # normally instead of quietly stalling. A session whose
+                    # spec sidecar was itself lost is logged loudly by
+                    # _recover() and stays untracked -- see
+                    # SessionAuthority._recover.
+                    for recovered_spec in authority.recovered_specs():
+                        aggregator.register_session(
+                            recovered_spec,
+                            decoded=authority.recovered_blocks(recovered_spec.session_id),
+                        )
+
+                worker_tasks = [
+                    ipc_task,
+                    task_group.create_task(supervisor.run()),
+                    dispatch_task,
+                    task_group.create_task(aggregator.run()),
+                    task_group.create_task(status_display.run()),
+                ]
+                task_group.create_task(_cancel_workers_on_shutdown(shutdown_event, worker_tasks))
+                logger.info(
+                    "session_manager_listening",
+                    socket_path=str(config.paths.socket_path),
+                    shm_name=config.shm.name,
+                    adopted=authority.adopted(),
+                )
     except* asyncio.CancelledError:
         pass  # defensive: normal shutdown exits the block above without raising
     except* Exception as exception_group:
@@ -337,7 +398,9 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
     # so a surviving receiver keeps its mapping on a crash path) and then
     # releases the lock, in that order -- it is the sole owner of both, so
     # main.py doesn't reach around it to interleave the socket unlink
-    # between the two.
+    # between the two. Safe even if authority.start() never got past
+    # acquiring the lock (or never ran at all): both close(unlink=...) and
+    # release() are no-ops when nothing was actually acquired.
     authority.shutdown(clean=clean_shutdown)
 
     return exit_code
