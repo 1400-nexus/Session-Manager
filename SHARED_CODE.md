@@ -164,6 +164,36 @@ and `LocalFileStore` via a `Harness`, same pattern as the shm contract test;
 prove — content survives the rename, the fallocate/truncate fallback, the
 overwrite refusal.
 
+`src/session_manager/adapters/append_journal.py` — `AppendJournal`, the real
+`Journal`. Fixed-width binary records (`session_id` 16 bytes padded,
+`block_id` u32, `offset` u64, `length` u32, then a CRC32 over those fields —
+formats in `adapters/constants.py`), one file per session under
+`journal_dir`. Relies on destination writes being idempotent (fixed offset,
+fixed content) so a replayed duplicate is harmless — that property is why
+this is ~100 lines instead of a write-ahead protocol; said explicitly in the
+class docstring. A short read or a failed CRC stops replay **without
+raising** — a torn tail is the expected shape of a crash, not an error.
+Batches `fdatasync` (Linux) / `fsync` (fallback, e.g. Windows) behind an
+explicit `sync()`, auto-triggered every `JOURNAL_SYNC_BATCH_SIZE` appends as
+a backstop if a caller never calls it; `replay` also flushes (not syncs) this
+instance's own open handle first, since visibility and durability are
+different guarantees and only the latter needs the barrier. `session_id`
+becomes a filename here, so it gets the same path-traversal check as
+`relpath` (`domain/paths.is_unsafe_relpath`), independently, on its own field.
+`tests/integration/test_journal_contract.py` runs the shared append/replay
+properties against `FakeJournal` and `AppendJournal` — the pattern's third
+outing. `tests/unit/test_append_journal.py` covers what only the real
+adapter can prove: a truncated tail replays every complete record and stops
+silently, a corrupted record stops replay there and logs, and `sync()`
+survives a fresh instance reopening the file.
+
+**Not yet wired:** nothing calls `Journal.append` when a block decodes —
+`ProgressAggregator.handle_block_decoded` doesn't hold a `Journal` reference.
+`SessionAuthority.start()` already calls `replay` on adopt, so the read side
+works; the write side needs wiring in Step 12 (composition root), most
+naturally as an extra call alongside `aggregator.handle_block_decoded` in
+whatever dispatches `BlockDecoded`.
+
 ## Config / build (renamed, structure kept)
 
 `pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,

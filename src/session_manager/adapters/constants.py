@@ -6,6 +6,19 @@ LOCK_PID_READ_BYTES = 32
 STAGED_FILE_MODE = 0o644
 QUARANTINE_SUBDIR_NAME = "quarantine"
 
+# Journal record: session_id (fixed, null-padded), block_id (u32), offset
+# (u64), length (u32) -- CRC32 is computed over exactly these packed bytes
+# and appended separately (JOURNAL_CRC_FORMAT).
+JOURNAL_SESSION_ID_BYTES = 16
+JOURNAL_FIELDS_FORMAT = f"<{JOURNAL_SESSION_ID_BYTES}sIQI"
+JOURNAL_CRC_FORMAT = "<I"
+JOURNAL_FILENAME_SUFFIX = ".journal"
+
+# fdatasync per append would dominate the write path at ~200 blocks/sec, so
+# appends batch and sync() is the explicit durability barrier; this is the
+# fallback auto-sync threshold if a caller appends without ever calling it.
+JOURNAL_SYNC_BATCH_SIZE = 200
+
 # Shared-memory completion segment header. The C++ receivers parse these exact
 # bytes, so the format is a cross-language contract: explicit little-endian
 # and standard packing (no native alignment padding). See adapters/shm_layout.py.
