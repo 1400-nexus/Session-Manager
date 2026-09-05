@@ -187,9 +187,13 @@ class SessionAuthority:
     async def _broadcast_session_open(
         self, spec: SessionSpec, block_table_offset: int, bitmap_offset: int
     ) -> None:
+        # Absolute, not spec.relpath: a receiver must write to exactly this
+        # path, not reconstruct one against its own idea of a staging
+        # directory -- see rx.proto's SessionOpen.dest_path.
+        dest_path = str(self._file_store.staged_path(spec.relpath).resolve())
         session_open = rx_pb2.SessionOpen(
             session_id=spec.session_id,
-            dest_path=spec.relpath,
+            dest_path=dest_path,
             total_blocks=spec.total_blocks,
             k=spec.k,
             n=spec.n,

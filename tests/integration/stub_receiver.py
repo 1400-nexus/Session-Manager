@@ -28,15 +28,6 @@ from session_manager.ipc.constants import RECV_BUFFER_BYTES, SESSION_OPEN_FIELD_
 
 DEFAULT_PROTO_DIR = "libs/nexus-proto/proto"
 
-# The same env var session_manager/constants.py:STAGING_DIR_ENV_VAR names --
-# duplicated as a literal, not imported, per the module docstring's
-# import restriction. This is how the stub finds the staged file the
-# manager already allocated (via LocalFileStore.allocate) by the time
-# SessionOpen arrives, the same way a real receiver would be told its
-# staging root out-of-band rather than over this wire contract.
-STAGING_DIR_ENV_VAR = "NEXUS_STAGING_DIR"
-DEFAULT_STAGING_DIR = "./staging"
-
 # Fixed FEC shape for every synthetic manifest this stub builds. Deliberately
 # trivial -- only block_byte_range's arithmetic (k * symbol_bytes per block)
 # needs to hold, not anything resembling a real transfer's parameters.
@@ -87,11 +78,6 @@ def _parse_id_list(raw: str) -> frozenset[int]:
 
 def _relpath_for(session_id: str) -> str:
     return f"stub-{session_id}.bin"
-
-
-def _staged_path(session_id: str) -> Path:
-    staging_dir = Path(os.environ.get(STAGING_DIR_ENV_VAR, DEFAULT_STAGING_DIR))
-    return staging_dir / _relpath_for(session_id)
 
 
 def _block_content(session_id: str, block_id: int) -> bytes:
@@ -185,7 +171,12 @@ async def heartbeat_loop(client: socket.socket) -> None:
         await loop.sock_sendall(client, codec.encode(ipc_pb2.Heartbeat()))
 
 
-async def _wait_for_session_open(client: socket.socket, session_id: str) -> None:
+async def _wait_for_session_open(client: socket.socket, session_id: str) -> str:
+    # dest_path is absolute -- the manager resolves it against its own
+    # staging_dir and this stub must write to exactly that path, never
+    # reconstruct one from its own idea of a staging root (see rx.proto's
+    # SessionOpen.dest_path doc comment; that coupling is what broke this
+    # stub the first time around).
     loop = asyncio.get_running_loop()
     while True:
         raw = await loop.sock_recv(client, RECV_BUFFER_BYTES)
@@ -193,7 +184,7 @@ async def _wait_for_session_open(client: socket.socket, session_id: str) -> None
             raise ConnectionError("disconnected while waiting for SessionOpen")
         field_name, message = codec.decode(raw)
         if field_name == SESSION_OPEN_FIELD_NAME and cast(Any, message).session_id == session_id:
-            return
+            return cast(str, cast(Any, message).dest_path)
 
 
 async def _drain_until_disconnected(client: socket.socket) -> None:
@@ -208,11 +199,12 @@ async def _write_and_report_blocks(
     client: socket.socket,
     receiver_id: int,
     session_id: str,
+    dest_path: str,
     total_blocks: int,
     withheld: frozenset[int],
     corrupted: frozenset[int],
 ) -> None:
-    with open(_staged_path(session_id), "r+b") as handle:
+    with open(dest_path, "r+b") as handle:
         for block_id in _shard_blocks(receiver_id, total_blocks):
             if block_id in withheld:
                 continue
@@ -233,11 +225,13 @@ class _Progress:
     Only the FIRST successful ManifestSeen for a session_id gets a
     SessionOpen back -- a resend after a reconnect is a duplicate the
     authority silently drops (SessionAuthority.handle_manifest_seen) -- so a
-    reconnecting stub must know not to wait for one that will never come.
+    reconnecting stub must know not to wait for one that will never come,
+    and must have cached the dest_path that SessionOpen carried the first
+    time, since nothing will hand it over again.
     """
 
     def __init__(self) -> None:
-        self.session_open_seen = False
+        self.dest_path: str | None = None
 
 
 async def _report_then_drain(
@@ -247,17 +241,17 @@ async def _report_then_drain(
     heartbeat_task: asyncio.Task[None],
 ) -> None:
     try:
-        if not progress.session_open_seen:
-            await asyncio.wait_for(
+        if progress.dest_path is None:
+            progress.dest_path = await asyncio.wait_for(
                 _wait_for_session_open(client, args.session_id),
                 timeout=SESSION_OPEN_TIMEOUT_SECONDS,
             )
-            progress.session_open_seen = True
 
         await _write_and_report_blocks(
             client,
             args.receiver_id,
             args.session_id,
+            progress.dest_path,
             args.blocks,
             _parse_id_list(args.withhold),
             _parse_id_list(args.corrupt),
@@ -294,7 +288,14 @@ async def run(args: argparse.Namespace) -> int:
             await run_once(args, progress, manifest)
         except* (OSError, ConnectionError) as exception_group:
             for error in exception_group.exceptions:
-                print(f"[receiver {args.receiver_id}] disconnected: {error}", flush=True)
+                # str(error) alone can be empty for some OSError subclasses,
+                # which previously produced an undiagnosable bare
+                # "disconnected: " with no text at all -- the type name is
+                # never empty.
+                print(
+                    f"[receiver {args.receiver_id}] disconnected: {type(error).__name__}: {error}",
+                    flush=True,
+                )
         # A wrong proto_hash never gets past this point either -- the server
         # closes the connection right after Hello, every time, so this stub
         # just keeps retrying forever like a real receiver would against a
