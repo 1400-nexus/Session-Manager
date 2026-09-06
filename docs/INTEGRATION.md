@@ -15,13 +15,33 @@ step 6.
 
 ## Step 1 — Contract hash agreement
 
-**Proves:** both sides compute the same `proto_hash` from `nexus-proto@a83fb3b`.
-One minute of work; nothing downstream can work if this is wrong.
+**Proves:** every process that opens a UDS connection computes the same
+`proto_hash` from `nexus-proto@30da722`. One minute of work; nothing downstream
+can work if this is wrong.
+
+**This is not just a receiver concern.** `file-monitor` is the UDS server on the
+TX side: a sender connects with `SenderHello` carrying `proto_hash` and
+`file-monitor` **refuses the connection** on a mismatch (its milestone 3 proves
+exactly that). `session-manager` does the same for receivers with
+`ReceiverHello`. A mismatch is a **closed connection**, not a subtle
+misbehaviour — so every UDS peer in the system (A's senders, B's receivers,
+both Python services) must build against the **same commit**:
+
+| process | connects to | must be on |
+|---|---|---|
+| `file-monitor` | — (server) | `30da722` |
+| N senders | `file-monitor` | `30da722` |
+| `session-manager` | — (server) | `30da722` |
+| N receivers | `session-manager` | `30da722` |
+
+As of this writing the `sender` repo is pinned at `60bd06e` (four commits
+behind) — **that sender will be refused by `file-monitor` at `30da722`.** It
+must be bumped before step 6.
 
 **Run:**
 
 ```bash
-# session-manager side
+# session-manager side (file-monitor is identical, its own ipc/handshake.py)
 cd session-manager
 python -c "from session_manager.ipc.handshake import compute_proto_hash; \
           from pathlib import Path; \
@@ -31,26 +51,26 @@ python -c "from session_manager.ipc.handshake import compute_proto_hash; \
 B computes the same hash in C++ over the same `.proto` directory (the algorithm
 is in `RECEIVER_CONTRACT.md §2` / `ipc/handshake.py`) and prints it hex.
 
-At `nexus-proto@a83fb3b` this is:
+At `nexus-proto@30da722` this is:
 
 ```
-51022f57e3ab23e42ebee46942e2a0a401c6f14972a3b614c2d56a6c90b40045
+e551eea559e22ba932a2985db6e37d343c8f985d9641b59ec27f61b5c4fd0a3f
 ```
 
-(Recompute rather than trusting this line — it changes with any `.proto` edit.)
+(Recompute rather than trusting this line — it changes with any `.proto` edit,
+including a comment.)
 
-**Pass:** the two 64-char hex strings are identical, and equal the value above.
+**Pass:** all sides print the same 64-char hex string, equal to the value above.
 
 **Failure means:** one of —
 - Different `nexus-proto` commit. Check `git -C libs/nexus-proto rev-parse HEAD`
-  on both sides; both must be `a83fb3b`. The `sender` repo is known to be behind
-  (`60bd06e`); the receiver must not be.
-- B's implementation stripped comments or normalized whitespace. The algorithm
+  everywhere; all must be `30da722`.
+- The implementation stripped comments or normalized whitespace. The algorithm
   hashes **raw bytes**.
-- B sorted filenames by something other than byte-wise ASCII, or added a
-  separator between files.
+- Filenames sorted by something other than byte-wise ASCII, or a separator added
+  between files.
 - Line-ending translation on checkout (`.gitattributes` in `nexus-proto` pins
-  `*.proto` to LF; confirm B's checkout didn't convert to CRLF).
+  `*.proto` to LF; confirm the checkout didn't convert to CRLF).
 
 **Check first:** the commit hashes. It's almost always that.
 

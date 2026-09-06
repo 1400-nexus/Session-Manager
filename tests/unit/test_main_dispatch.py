@@ -96,6 +96,8 @@ def _context(
         send_to_receiver=send_to_receiver,
         on_session_opened=aggregator.register_session,
         shm_name="seg",
+        staging_dir="/staging",
+        journal_dir="/journal",
         arena_bytes=ARENA_BYTES,
         session_region_base=REGION_BASE,
     )
@@ -186,7 +188,11 @@ async def test_a_duplicate_manifest_seen_is_answered_with_session_open_to_that_r
     assert message.session_id == str(SESSION)  # type: ignore[attr-defined]
 
 
-async def test_receiver_hello_after_a_session_is_open_replays_its_session_open() -> None:
+def _decoded_sends(sends: list[tuple[ReceiverId, bytes]]) -> list[tuple[ReceiverId, str, Any]]:
+    return [(receiver_id, *codec.decode(payload)) for receiver_id, payload in sends]
+
+
+async def test_receiver_hello_sends_config_then_replays_open_sessions() -> None:
     sends: list[tuple[ReceiverId, bytes]] = []
     context, _clock, _shm, _aggregator, _journal = _context(sends=sends)
     await context.authority.start()
@@ -196,15 +202,17 @@ async def test_receiver_hello_after_a_session_is_open_replays_its_session_open()
 
     await _handle_receiver_hello(context, ReceiverId(5), rx_pb2.ReceiverHello(receiver_id=5))
 
-    assert len(sends) == 1
-    receiver_id, payload = sends[0]
-    assert receiver_id == ReceiverId(5)
-    field_name, message = codec.decode(payload)
-    assert field_name == "session_open"
-    assert message.session_id == str(SESSION)  # type: ignore[attr-defined]
+    decoded = _decoded_sends(sends)
+    assert all(receiver_id == ReceiverId(5) for receiver_id, _, _ in decoded)
+    assert [field_name for _, field_name, _ in decoded] == ["config", "session_open"]
+    config = decoded[0][2]
+    assert config.shm_name == "seg"
+    assert config.staging_dir == "/staging"
+    assert config.journal_dir == "/journal"
+    assert decoded[1][2].session_id == str(SESSION)
 
 
-async def test_receiver_hello_before_authority_start_only_registers() -> None:
+async def test_receiver_hello_before_authority_start_sends_config_but_no_session_open() -> None:
     sends: list[tuple[ReceiverId, bytes]] = []
     unset_ready = asyncio.Event()  # authority.start() has not run
     context, _clock, _shm, _aggregator, _journal = _context(sends=sends, ready=unset_ready)
@@ -212,7 +220,7 @@ async def test_receiver_hello_before_authority_start_only_registers() -> None:
     await _handle_receiver_hello(context, ReceiverId(5), rx_pb2.ReceiverHello(receiver_id=5))
 
     assert context.registry.active_receivers() == frozenset({ReceiverId(5)})
-    assert sends == []
+    assert [field_name for _, field_name, _ in _decoded_sends(sends)] == ["config"]
 
 
 async def test_handle_receiver_stats_uses_the_connection_receiver_id_not_the_payload() -> None:

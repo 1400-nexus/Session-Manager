@@ -23,6 +23,7 @@ from session_manager.ports.protocols import Clock, ShmReader
 logger = structlog.get_logger(__name__)
 
 OnComplete = Callable[[SessionSnapshot], Awaitable[None]]
+OnStalled = Callable[[SessionSnapshot], Awaitable[None]]
 LiveReceivers = Callable[[], frozenset[ReceiverId]]
 
 # Once a session reaches one of these, poll() must stop rebuilding its
@@ -73,10 +74,12 @@ class ProgressAggregator:
         poll_interval_s: float,
         stall_timeout_s: float,
         shm_crosscheck: bool,
+        on_stalled: OnStalled | None = None,
     ) -> None:
         self._clock: Clock = clock
         self._shm_reader: ShmReader = shm_reader
         self._on_complete: OnComplete = on_complete
+        self._on_stalled: OnStalled | None = on_stalled
         self._live_receivers: LiveReceivers = live_receivers
         self._poll_interval_s: float = poll_interval_s
         self._stall_timeout_s: float = stall_timeout_s
@@ -186,6 +189,8 @@ class ProgressAggregator:
                 missing_block_count=snapshot.missing_block_count,
                 missing_blocks_preview=[int(block_id) for block_id in snapshot.missing_blocks],
             )
+            if self._on_stalled is not None:
+                await self._on_stalled(snapshot)
 
     def _build_snapshot(
         self, session_id: SessionId, progress: _SessionProgress, now: float

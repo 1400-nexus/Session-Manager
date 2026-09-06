@@ -37,26 +37,32 @@ class _Rig:
     clock: FakeClock
     shm: FakeShm
     completed: list[SessionSnapshot] = field(default_factory=list)
+    stalled: list[SessionSnapshot] = field(default_factory=list)
 
 
 def _rig(*, shm_crosscheck: bool = True, stall_timeout_s: float = 8.0) -> _Rig:
     clock = FakeClock()
     shm = FakeShm()
     completed: list[SessionSnapshot] = []
+    stalled: list[SessionSnapshot] = []
 
     async def on_complete(snapshot: SessionSnapshot) -> None:
         completed.append(snapshot)
+
+    async def on_stalled(snapshot: SessionSnapshot) -> None:
+        stalled.append(snapshot)
 
     aggregator = ProgressAggregator(
         clock=clock,
         shm_reader=shm,
         on_complete=on_complete,
+        on_stalled=on_stalled,
         live_receivers=lambda: frozenset({R0, R1}),
         poll_interval_s=1.0,
         stall_timeout_s=stall_timeout_s,
         shm_crosscheck=shm_crosscheck,
     )
-    return _Rig(aggregator, clock, shm, completed)
+    return _Rig(aggregator, clock, shm, completed, stalled)
 
 
 def _init_shm_session(shm: FakeShm, spec: SessionSpec) -> None:
@@ -131,6 +137,19 @@ async def test_a_stalled_session_reports_incomplete_with_the_missing_blocks() ->
     assert rig.completed == []
     stalled = [entry for entry in logs if entry["event"] == "session_stalled"]
     assert stalled and stalled[0]["missing_blocks_preview"] == [1, 3, 4]
+
+
+async def test_on_stalled_fires_exactly_once_per_session() -> None:
+    rig = _rig(shm_crosscheck=False, stall_timeout_s=8.0)
+    spec = _spec(total_blocks=5)
+    rig.aggregator.register_session(spec)
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 2])
+    rig.clock.advance(9.0)
+
+    await rig.aggregator.poll()
+    await rig.aggregator.poll()  # still stalled -- must not fire again
+
+    assert [snapshot.spec.session_id for snapshot in rig.stalled] == [spec.session_id]
 
 
 async def test_a_complete_session_is_handed_to_the_verifier_exactly_once() -> None:

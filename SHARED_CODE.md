@@ -4,16 +4,15 @@ Code in this repo that was **copied from `file-monitor`** rather than written
 here. When `file-monitor` fixes a bug in one of these, it has to be carried
 across by hand — there is no shared package. Keep this table honest.
 
-Pin: `libs/nexus-proto` is a submodule pinned to **`a83fb3b`**. This is
-ahead of `file-monitor`'s `cef65a6` by two commits, both comment-only edits
-to `rx.proto` (a file `file-monitor` does not use): `SessionOpen.dest_path`
-is now documented as absolute, and `SessionOpen` as idempotent/re-sendable.
-`proto_hash` covers raw `.proto` bytes, so this pin computes a *different*
-hash from `file-monitor`'s — the two services never handshake with each
-other, so that is fine, but **B's C++ receiver must build against `a83fb3b`**
-while his sender stays on `cef65a6` (or bump `file-monitor` too, to realign;
-the generated Python is byte-identical either way). Check with
-`git submodule status`.
+Pin: `libs/nexus-proto` is a submodule pinned to **`30da722`**. `file-monitor`
+is realigned to the same commit. The commits past `cef65a6` are all
+comment-only `rx.proto` edits — `SessionOpen.dest_path` absolute,
+`SessionOpen` idempotent, `BlockDecoded` durability — so the generated code
+is byte-identical, but `proto_hash` covers raw `.proto` bytes and changes
+with every one of them. **Every process that opens a UDS connection must
+build against this exact commit** — a mismatch is a refused connection, not
+a subtle bug. Check with `git submodule status`; see `docs/INTEGRATION.md`
+step 1 for the digest.
 
 ## Verbatim (only `file_monitor` → `session_manager` in imports)
 

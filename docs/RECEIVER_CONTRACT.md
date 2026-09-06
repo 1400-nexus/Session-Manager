@@ -4,11 +4,13 @@ Everything a C++ receiver needs to talk to `session-manager`. You should be able
 to implement against this document without reading the Python. Where it points
 at a source file, that file is the authority and this is a summary.
 
-Contract pin: **`nexus-proto` at `a83fb3b`**. Build your generated code from that
-commit. The two commits after `cef65a6` are comment-only (`SessionOpen.dest_path`
-documented as absolute; `SessionOpen` documented as idempotent) but `proto_hash`
-covers raw `.proto` bytes, so they still change the hash — see the handshake
-section.
+Contract pin: **`nexus-proto` at `30da722`**. Build your generated C++ from that
+exact commit. The commits past `cef65a6` are all comment-only `rx.proto` edits,
+so the generated code is byte-identical — but `proto_hash` covers raw `.proto`
+bytes and changes with every one of them, and a wrong hash is a **refused
+connection** (see §2). Every process that opens a UDS connection — your
+receiver here, A's senders against `file-monitor` — must be on this same
+commit.
 
 The file payload never crosses into `session-manager`. You FEC-decode blocks and
 write the bytes to disk yourself; `session-manager` aggregates your per-block
@@ -79,17 +81,21 @@ quietly diverges between C++ and Python.
 you → manager                     manager → you
 ─────────────                     ────────────
 ReceiverHello  ───────────────►
+                              ◄── Config        (shm name, staging dir, journal dir)
                               ◄── SessionOpen   (one per already-open session,
                                                  if any exist at connect time)
 ManifestSeen   ───────────────►   (per session, first time you see its Manifest)
                               ◄── SessionOpen   (for that session)
-BlockDecoded   ───────────────►   (repeatedly, as you decode blocks)
+BlockDecoded   ───────────────►   (repeatedly, as you decode blocks — bytes durable first)
 ReceiverStats  ───────────────►   (repeatedly, health counters — optional)
 Heartbeat      ───────────────►   (every ~1 s, throughout, from just after Hello)
+                              ◄── PurgeSession  (when a session ends: verified,
+                                                 hash_mismatch, or incomplete)
 ```
 
-`Config` and `PurgeSession` exist in `rx.proto` but the manager **does not send
-them today** (see §6). Do not block waiting for a `Config`.
+`Config` is sent once, immediately after a successful `ReceiverHello`, before
+any `SessionOpen`. `PurgeSession` is sent when a session reaches a terminal
+state so you can release the slot you were writing into.
 
 ### Ordering rules
 
@@ -102,6 +108,7 @@ them today** (see §6). Do not block waiting for a `Config`.
 | never send `ReceiverStats` | fine — the status display just shows zero counters for you. |
 | send a `block_id` ≥ `total_blocks` | that id is silently ignored; the rest of the message is still processed. |
 | report the same block twice, or two receivers report one block | idempotent — counted once, no error. |
+| report `BlockDecoded` before the block's bytes are on disk | the manager journals it and, on an adopting restart, never asks for it again — a hole in the recovered file (§5, property 5). |
 
 The manager's dispatch is single-threaded and processes messages in arrival
 order, so "first `ManifestSeen` wins and creates the session" is not a race.
@@ -169,6 +176,9 @@ into the session's decoded set. When the set reaches `total_blocks` the manager
 hashes `dest_path` and either publishes (`session_verified` path →
 `session_published`) or quarantines (`hash_mismatch` → `session_quarantined`).
 
+**Before you send this, the block's bytes must be durable on disk** — see §5,
+property 5. This is not optional and you cannot infer it from the message shape.
+
 ### `ReceiverStats` (R→M)
 
 ```
@@ -203,11 +213,32 @@ message Heartbeat {
 
 Reused from `ipc.proto`. Send one roughly every second. See §5, property 4.
 
-### `Config` (M→R), `PurgeSession` (M→R)
+### `Config` (M→R)
 
-Defined in `rx.proto`, **not sent by the current manager**. `Config` is the
-intended carrier for `shm_name` / `staging_dir` / `journal_dir`; until it is
-wired, see §6.
+```
+message Config {
+  string shm_name     = 1;  // the completion segment to shm_open
+  string staging_dir  = 2;  // where dest_path lives (dest_path is already absolute)
+  string journal_dir  = 3;  // the manager's private recovery dir -- informational
+}
+```
+
+Sent once, right after a successful `ReceiverHello`. Use `shm_name` to attach
+the segment (§6). You do not need `staging_dir` — `SessionOpen.dest_path` is
+absolute — or `journal_dir`; they are there for completeness.
+
+### `PurgeSession` (M→R)
+
+```
+message PurgeSession {
+  string session_id = 1;
+  string reason     = 2;  // "verified" | "hash_mismatch" | "incomplete"
+}
+```
+
+Sent when a session reaches a terminal state. Release the shm slot / file
+handles you held for `session_id`; do not expect more traffic for it. A
+`PurgeSession` for a session you don't know is a no-op.
 
 ### Note on `receiver_id` inside message bodies
 
@@ -220,7 +251,7 @@ the peer table.
 
 ---
 
-## 5. The four properties you must respect
+## 5. The five properties you must respect
 
 ### Property 1 — `SessionOpen.dest_path` is absolute and authoritative
 
@@ -286,6 +317,37 @@ Being dropped has two consequences beyond disappearing from the status display:
    a manager restart — reconnect, re-`ReceiverHello`, resume heartbeats — and
    the restart **adopts** the segment instead.
 
+### Property 5 — a block's bytes must be durable before you report it
+
+Between writing a block to `dest_path` and sending its `BlockDecoded`, the bytes
+must have reached disk: **`write()` then `fsync()`/`fdatasync()`**, or open the
+file `O_SYNC`. The pre-allocated file means `fdatasync` (no metadata sync) is
+enough.
+
+Why it is not optional:
+
+- The manager **journals every `BlockDecoded`** and fsyncs the journal
+  periodically.
+- On an **adopting restart** (manager process killed, you reconnected in time,
+  `adopted=True`) the manager rebuilds the decoded set from that journal and
+  **never asks for a journaled block again**.
+- So if you report block *N*, the manager journals it, the journal is synced,
+  and *then* the manager is killed while *N*'s bytes are still in a write buffer
+  — the restarted manager counts *N* as done, no one re-sends it, and the
+  recovered file has `k * block_bytes` of zeros where *N* should be.
+- It surfaces only at the very end as `session_quarantined` /
+  `hash_mismatch` on the whole file, with **nothing indicating which block or
+  which receiver**. (The manager logs `recovered_session_failed_verification`
+  when a mismatch follows an adopt, to separate this from FEC corruption — but
+  that still doesn't tell you the block.)
+
+The cost is on your hot path by design. The alternative — the manager
+re-reading every staged file byte on recovery — defeats the point of the
+journal. `rx.proto`'s `BlockDecoded` comment says the same.
+
+The same rule applies to a block you re-report after reconnecting: re-write and
+re-sync it, don't assume the earlier buffered write survived.
+
 ---
 
 ## 6. Shared memory
@@ -349,12 +411,9 @@ for a running session (it zeroes the `bitmap` once at session open).
 
 ### The segment name
 
-You need the segment's name to `shm_open` it. `SessionOpen` does **not** carry
-it and the `Config` message that would is not sent yet (§4). For now: take it
-out of band from `[shm].name` (env `NEXUS_SHM_NAME`, default `nexus-rx`) and it
-**must** equal the manager's. The staged file you get from `dest_path`, so you
-do **not** need `staging_dir`; you never touch the journal, so you do **not**
-need `journal_dir`.
+Take it from **`Config.shm_name`** (§4), delivered right after your
+`ReceiverHello`. Do not read it from an env var and hope it matches — that
+convention-coupling is exactly what `Config` exists to remove.
 
 ---
 

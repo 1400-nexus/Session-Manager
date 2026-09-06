@@ -210,3 +210,22 @@ def test_bitmap_for_returns_a_readonly_view_that_rejects_writes(harness: Harness
     assert view.readonly is True
     with pytest.raises(TypeError):
         view[0] = 1
+
+
+def test_a_created_segment_can_be_unlinked_then_created_again(harness: Harness) -> None:
+    # close(unlink=True) must undo create_or_adopt cleanly -- detach then
+    # SharedMemory.unlink() double-notifies the resource tracker, which used
+    # to print a KeyError traceback on every clean shutdown. If the unlink
+    # worked, the name is free and a second create succeeds.
+    first = harness.make()
+    harness.ensure_absent()
+    assert first.create_or_adopt(harness.name, ARENA_BYTES) is False
+    first.close(unlink=True)
+
+    with pytest.raises(FileNotFoundError):
+        shared_memory.SharedMemory(name=harness.name, create=False)
+
+    second = harness.make()
+    assert second.create_or_adopt(harness.name, ARENA_BYTES) is False
+    assert second.last_decision is AdoptDecision.CREATED
+    second.close(unlink=True)

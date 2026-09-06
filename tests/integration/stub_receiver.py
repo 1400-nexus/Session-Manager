@@ -76,6 +76,15 @@ def _parse_id_list(raw: str) -> frozenset[int]:
     return frozenset(int(part) for part in raw.split(",") if part.strip())
 
 
+def _make_durable(file_descriptor: int) -> None:
+    # fdatasync where it exists (Linux) -- the file is pre-allocated so its
+    # size never changes and a metadata sync is not needed; fsync otherwise.
+    if hasattr(os, "fdatasync"):
+        os.fdatasync(file_descriptor)
+    else:
+        os.fsync(file_descriptor)
+
+
 def _relpath_for(session_id: str) -> str:
     return f"stub-{session_id}.bin"
 
@@ -214,6 +223,16 @@ async def _write_and_report_blocks(
             offset, _length = _block_byte_range(block_id)
             handle.seek(offset)
             handle.write(content)
+            # Durable BEFORE the report. session-manager journals every
+            # BlockDecoded and, on an adopting restart, counts a journaled
+            # block as done and never expects it again -- so a block reported
+            # while its bytes are still in a buffer becomes a hole in the
+            # recovered file that only surfaces as a hash mismatch at the very
+            # end. This is the contract (rx.proto BlockDecoded,
+            # docs/RECEIVER_CONTRACT.md §5); a real receiver carries the same
+            # cost on its hot path.
+            handle.flush()
+            _make_durable(handle.fileno())
             await send_block_decoded(client, receiver_id, session_id, [block_id])
             await asyncio.sleep(BLOCK_REPORT_PACING_SECONDS)
     print(f"[receiver {receiver_id}] finished reporting its shard for {session_id}", flush=True)

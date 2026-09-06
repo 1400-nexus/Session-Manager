@@ -90,6 +90,8 @@ class SessionAuthority:
         send_to_receiver: SendToReceiver,
         on_session_opened: OnSessionOpened,
         shm_name: str,
+        staging_dir: str,
+        journal_dir: str,
         arena_bytes: int,
         session_region_base: int,
     ) -> None:
@@ -102,10 +104,13 @@ class SessionAuthority:
         self._send_to_receiver: SendToReceiver = send_to_receiver
         self._on_session_opened: OnSessionOpened = on_session_opened
         self._shm_name: str = shm_name
+        self._staging_dir: str = staging_dir
+        self._journal_dir: str = journal_dir
         self._arena_bytes: int = arena_bytes
         self._next_offset: int = session_region_base
         self._known: dict[SessionId, OpenSession] = {}
         self._specs: dict[SessionId, SessionSpec] = {}
+        self._recovered_ids: set[SessionId] = set()
         self._adopted: bool = False
 
     async def start(self) -> None:
@@ -159,6 +164,19 @@ class SessionAuthority:
         logger.info("session_opened", session_id=session_id, total_blocks=spec.total_blocks)
         await self._broadcast(self._session_open_message(spec, open_session))
 
+    async def send_config_to(self, receiver_id: ReceiverId) -> None:
+        # Delivered right after a successful ReceiverHello so a receiver never
+        # has to be told the segment name / staging dir out of band and match
+        # by convention -- the same implicit coupling that made a relative
+        # dest_path fail. Safe before authority.start(): these are static
+        # config, not session state.
+        config = rx_pb2.Config(
+            shm_name=self._shm_name,
+            staging_dir=self._staging_dir,
+            journal_dir=self._journal_dir,
+        )
+        await self._send_to_receiver(receiver_id, codec.encode(config))
+
     async def send_open_sessions_to(self, receiver_id: ReceiverId) -> None:
         # A receiver that connects (or reconnects) after a session opened
         # never saw its broadcast; this is how it learns the session exists
@@ -168,6 +186,13 @@ class SessionAuthority:
 
     def adopted(self) -> bool:
         return self._adopted
+
+    def was_recovered(self, session_id: SessionId) -> bool:
+        # True for a session rebuilt from the journal on an adopting restart.
+        # A hash mismatch on one of these points at a durability gap (a block
+        # journaled before its bytes hit disk -- see rx.proto BlockDecoded),
+        # not FEC corruption, and the composition root logs it differently.
+        return session_id in self._recovered_ids
 
     def shutdown(self, clean: bool = True) -> None:
         self._shm.close(unlink=clean)
@@ -197,6 +222,7 @@ class SessionAuthority:
                 )
                 continue
             self._specs[open_session.session_id] = spec
+            self._recovered_ids.add(open_session.session_id)
             self._on_session_opened(spec, frozenset(decoded))
 
             logger.info(

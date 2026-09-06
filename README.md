@@ -38,7 +38,7 @@ in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 ## Setup
 
 ```bash
-git submodule update --init          # pulls in libs/nexus-proto (pinned a83fb3b)
+git submodule update --init          # pulls in libs/nexus-proto (pinned 30da722)
 cp .env.example .env && source .env  # sets PYTHONPATH for the generated protobuf code
 pip install -e '.[dev]'
 python -m session_manager.main       # reads ./config.toml by default
@@ -104,8 +104,10 @@ receiver that decodes correctly until someone retunes `k` on the TX side, then
 writes garbage that looks like packet loss.
 
 The `nexus-proto` pin and `proto_hash` are a cross-service contract: a mismatch
-does not fail loudly on its own, it refuses every receiver's handshake. Check
-`git -C libs/nexus-proto rev-parse HEAD` — it must be `a83fb3b`.
+does not fail loudly on its own, it refuses every receiver's handshake — the
+same for a sender against `file-monitor`. Check
+`git -C libs/nexus-proto rev-parse HEAD` — it must be `30da722`, and every
+other UDS peer in the system must build against the same commit.
 
 ## Running in a container
 

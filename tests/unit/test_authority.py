@@ -116,6 +116,8 @@ def _rig(
         send_to_receiver=send_to_receiver,
         on_session_opened=on_session_opened,
         shm_name=SHM_NAME,
+        staging_dir="/var/nexus/staging",
+        journal_dir="/var/nexus/journal",
         arena_bytes=ARENA_BYTES,
         session_region_base=REGION_BASE,
     )
@@ -212,10 +214,28 @@ async def test_adopting_a_live_segment_leaves_its_bytes_intact_and_recovers_sess
     assert decoded == frozenset({BlockId(0), BlockId(2)})
     assert spec.relpath == "sub/dir/output.bin"
     assert spec.total_blocks == TOTAL_BLOCKS
+    assert second.authority.was_recovered(SessionId("s-1")) is True
+    assert first.authority.was_recovered(SessionId("s-1")) is False  # created, not recovered
 
     await second.authority.handle_manifest_seen(R2, _manifest_seen("s-1"))
     assert second.broadcasts == []  # a duplicate is answered directly, not re-broadcast
     assert [receiver_id for receiver_id, _ in second.sends] == [R2]
+
+
+async def test_send_config_to_carries_the_shm_name_and_dirs() -> None:
+    rig = _rig()
+    await rig.authority.start()
+
+    await rig.authority.send_config_to(R1)
+
+    assert len(rig.sends) == 1
+    receiver_id, payload = rig.sends[0]
+    assert receiver_id == R1
+    field_name, message = codec.decode(payload)
+    assert field_name == "config"
+    assert cast(Any, message).shm_name == SHM_NAME
+    assert cast(Any, message).staging_dir == "/var/nexus/staging"
+    assert cast(Any, message).journal_dir == "/var/nexus/journal"
 
 
 async def test_a_session_with_a_lost_spec_sidecar_is_known_but_untracked() -> None:

@@ -34,13 +34,31 @@ def detach_resource_tracker(segment: shared_memory.SharedMemory) -> None:
     # dev loop.
     if os.name != "posix":
         return
-    # `_name` (not the public `.name`, which strips the leading slash the
-    # tracker registered the segment under). typeshed does not expose it.
-    tracked_name: str = getattr(segment, "_name")
     try:
-        resource_tracker.unregister(tracked_name, "shared_memory")
+        resource_tracker.unregister(_tracked_name(segment), "shared_memory")
     except (OSError, KeyError):
         pass
+
+
+def reattach_resource_tracker(segment: shared_memory.SharedMemory) -> None:
+    # The inverse of detach, called immediately before our own explicit
+    # SharedMemory.unlink() on a clean shutdown. unlink() unconditionally
+    # sends the tracker an unregister; without a matching register first that
+    # is a message for a name detach_resource_tracker already removed, and
+    # the tracker process prints a KeyError traceback (harmless, but it lands
+    # in every clean-shutdown log). Re-registering here balances it.
+    if os.name != "posix":
+        return
+    try:
+        resource_tracker.register(_tracked_name(segment), "shared_memory")
+    except OSError:
+        pass
+
+
+def _tracked_name(segment: shared_memory.SharedMemory) -> str:
+    # `_name` (not the public `.name`, which strips the leading slash the
+    # tracker registered the segment under). typeshed does not expose it.
+    return str(getattr(segment, "_name"))
 
 
 @dataclass(frozen=True)
@@ -138,6 +156,7 @@ class PosixShm:
             return
         segment.close()
         if unlink:
+            reattach_resource_tracker(segment)
             segment.unlink()
         self._segment = None
 
