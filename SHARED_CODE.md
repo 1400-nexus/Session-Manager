@@ -4,15 +4,14 @@ Code in this repo that was **copied from `file-monitor`** rather than written
 here. When `file-monitor` fixes a bug in one of these, it has to be carried
 across by hand — there is no shared package. Keep this table honest.
 
-Pin: `libs/nexus-proto` is a submodule pinned to **`30da722`**. `file-monitor`
-is realigned to the same commit. The commits past `cef65a6` are all
-comment-only `rx.proto` edits — `SessionOpen.dest_path` absolute,
-`SessionOpen` idempotent, `BlockDecoded` durability — so the generated code
-is byte-identical, but `proto_hash` covers raw `.proto` bytes and changes
-with every one of them. **Every process that opens a UDS connection must
-build against this exact commit** — a mismatch is a refused connection, not
-a subtle bug. Check with `git submodule status`; see `docs/INTEGRATION.md`
-step 1 for the digest.
+Pin: `libs/nexus-proto` is a submodule pinned to **`7f406db`**. `file-monitor`
+is realigned to the same commit. The RX contract has not changed structurally
+since `cef65a6` (the `rx.proto` edits since are comments), but `ipc.proto`
+gained `AssignSession.source_path` for the sender, and `proto_hash` covers
+the raw bytes of every `.proto` — so it has moved several times. **Every
+process that opens a UDS connection must build against this exact commit** —
+a mismatch is a refused connection, not a subtle bug. Check with
+`git submodule status`; `docs/INTEGRATION.md` step 1 carries the digest.
 
 ## Verbatim (only `file_monitor` → `session_manager` in imports)
 

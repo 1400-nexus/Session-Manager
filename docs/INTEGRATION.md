@@ -16,7 +16,7 @@ step 6.
 ## Step 1 — Contract hash agreement
 
 **Proves:** every process that opens a UDS connection computes the same
-`proto_hash` from `nexus-proto@30da722`. One minute of work; nothing downstream
+`proto_hash` from `nexus-proto@7f406db`. One minute of work; nothing downstream
 can work if this is wrong.
 
 **This is not just a receiver concern.** `file-monitor` is the UDS server on the
@@ -29,14 +29,16 @@ both Python services) must build against the **same commit**:
 
 | process | connects to | must be on |
 |---|---|---|
-| `file-monitor` | — (server) | `30da722` |
-| N senders | `file-monitor` | `30da722` |
-| `session-manager` | — (server) | `30da722` |
-| N receivers | `session-manager` | `30da722` |
+| `file-monitor` | — (server) | `7f406db` |
+| N senders | `file-monitor` | `7f406db` |
+| `session-manager` | — (server) | `7f406db` |
+| N receivers | `session-manager` | `7f406db` |
 
-As of this writing the `sender` repo is pinned at `60bd06e` (four commits
-behind) — **that sender will be refused by `file-monitor` at `30da722`.** It
-must be bumped before step 6.
+As of this writing the `sender` repo is pinned at `60bd06e` (five commits
+behind `7f406db`) — **that sender will be refused by `file-monitor`**, and it
+is also missing `AssignSession.source_path` and the `Manifest.sender_id`
+shard-residue comment. It must be bumped before step 6; see
+`file-monitor/docs/SENDER_CONTRACT.md`.
 
 **Run:**
 
@@ -51,10 +53,10 @@ python -c "from session_manager.ipc.handshake import compute_proto_hash; \
 B computes the same hash in C++ over the same `.proto` directory (the algorithm
 is in `RECEIVER_CONTRACT.md §2` / `ipc/handshake.py`) and prints it hex.
 
-At `nexus-proto@30da722` this is:
+At `nexus-proto@7f406db` this is:
 
 ```
-e551eea559e22ba932a2985db6e37d343c8f985d9641b59ec27f61b5c4fd0a3f
+38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df
 ```
 
 (Recompute rather than trusting this line — it changes with any `.proto` edit,
@@ -64,7 +66,7 @@ including a comment.)
 
 **Failure means:** one of —
 - Different `nexus-proto` commit. Check `git -C libs/nexus-proto rev-parse HEAD`
-  everywhere; all must be `30da722`.
+  everywhere; all must be `7f406db`.
 - The implementation stripped comments or normalized whitespace. The algorithm
   hashes **raw bytes**.
 - Filenames sorted by something other than byte-wise ASCII, or a separator added

@@ -4,13 +4,14 @@ Everything a C++ receiver needs to talk to `session-manager`. You should be able
 to implement against this document without reading the Python. Where it points
 at a source file, that file is the authority and this is a summary.
 
-Contract pin: **`nexus-proto` at `30da722`**. Build your generated C++ from that
-exact commit. The commits past `cef65a6` are all comment-only `rx.proto` edits,
-so the generated code is byte-identical — but `proto_hash` covers raw `.proto`
-bytes and changes with every one of them, and a wrong hash is a **refused
-connection** (see §2). Every process that opens a UDS connection — your
-receiver here, A's senders against `file-monitor` — must be on this same
-commit.
+Contract pin: **`nexus-proto` at `7f406db`**. Build your generated C++ from that
+exact commit. Nothing in the RX contract has changed structurally since
+`cef65a6` — the `rx.proto` edits since are all comments — but `proto_hash`
+covers the raw bytes of *every* `.proto` file (including `ipc.proto`, which
+gained an `AssignSession.source_path` field for the sender), so the hash has
+moved several times and a wrong one is a **refused connection** (see §2).
+Every process that opens a UDS connection — your receiver here, A's senders
+against `file-monitor` — must be on this same commit.
 
 The file payload never crosses into `session-manager`. You FEC-decode blocks and
 write the bytes to disk yourself; `session-manager` aggregates your per-block
