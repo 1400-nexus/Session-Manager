@@ -1,0 +1,10 @@
+# The graded machines and every container run Linux. A CRLF checkout of a
+# shell script breaks it there -- `set -euo pipefail` becomes `set -euo
+# pipefail\r`, "invalid option name" -- and an entrypoint's `#!/bin/sh\r`
+# fails to exec. Git for Windows defaults to core.autocrlf=true, so without
+# these a Windows clone of this repo produces scripts that only run on
+# Windows. eol=lf overrides autocrlf.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.toml text eol=lf
+*.bat  text eol=crlf
