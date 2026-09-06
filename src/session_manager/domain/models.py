@@ -28,7 +28,7 @@ class SessionState(Enum):
     FAILED = auto()
 
 
-# rx_pb2 at the pinned contract (cef65a6) has no SessionStatus.State enum, so
+# rx_pb2 at the pinned contract (a83fb3b) has no SessionStatus.State enum, so
 # the boundary layer translates by name against this table until the proto
 # gains one. When it does, delete this and translate by SessionState[wire_name].
 SESSION_STATE_BY_WIRE_NAME: dict[str, SessionState] = {state.name: state for state in SessionState}
