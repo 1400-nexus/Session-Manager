@@ -84,6 +84,11 @@ class ProgressAggregator:
         self._sessions: dict[SessionId, _SessionProgress] = {}
         self._receiver_counters: dict[ReceiverId, ReceiverCounters] = {}
         self._snapshots: dict[SessionId, SessionSnapshot] = {}
+        # Sessions whose shm cross-check has already produced a warning. The
+        # bitmap either diverges or it doesn't; once it does, the condition
+        # persists every poll, and 300 identical lines bury the one that
+        # matters. Report it once per session, then stay quiet.
+        self._crosscheck_warned: set[SessionId] = set()
 
     def register_session(self, spec: SessionSpec, decoded: Collection[BlockId] = ()) -> None:
         self._sessions[spec.session_id] = _SessionProgress(
@@ -216,14 +221,21 @@ class ProgressAggregator:
         )
 
     def _cross_check(self, session_id: SessionId, uds_count: int) -> None:
+        if session_id in self._crosscheck_warned:
+            return
         bitmap_count = self._bitmap_popcount(session_id)
-        if bitmap_count is not None and bitmap_count != uds_count:
+        if bitmap_count is None:
+            # _bitmap_popcount already logged shm_bitmap_unavailable.
+            self._crosscheck_warned.add(session_id)
+            return
+        if bitmap_count != uds_count:
             logger.warning(
                 "shm_bitmap_diverges_from_uds",
                 session_id=session_id,
                 uds_count=uds_count,
                 bitmap_count=bitmap_count,
             )
+            self._crosscheck_warned.add(session_id)
 
     def _bitmap_popcount(self, session_id: SessionId) -> int | None:
         try:

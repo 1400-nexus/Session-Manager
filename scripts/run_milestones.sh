@@ -61,7 +61,10 @@ slot_bytes = 4096
 [aggregation]
 poll_interval_s = 0.2
 stall_timeout_s = 1.5
-shm_crosscheck = true
+# Off: no receiver here writes the shm bitmap, so with it on every session
+# "diverges" (bitmap 0 vs a climbing UDS count) forever. The UDS
+# BlockDecoded stream is authoritative on its own.
+shm_crosscheck = false
 
 [receivers]
 count = 0
@@ -370,16 +373,20 @@ milestone_4() {
     fi
 
     local ok=0
-    if ! grep -q "adopted=True" "$LOG_DIR/m4_manager_2.log"; then
+    # These lines are written only after the restarted manager waits out its
+    # adopt grace period (ADOPT_GRACE_PERIOD_SECONDS, ~1.5s), calls
+    # authority.start(), and runs recovery -- so wait for them rather than
+    # grepping a log that start_manager only waited for the socket on.
+    if ! wait_for_log "$LOG_DIR/m4_manager_2.log" "session_recovered" 15; then
+        echo "FAIL: session_recovered was never logged on restart"
+        ok=1
+    fi
+    if ! wait_for_log "$LOG_DIR/m4_manager_2.log" "adopted=True" 15; then
         echo "FAIL: restart did not adopt (expected adopted=True in the log)"
         ok=1
     fi
     if grep -q "session_spec_missing_on_recovery" "$LOG_DIR/m4_manager_2.log"; then
         echo "FAIL: session spec was lost on recovery"
-        ok=1
-    fi
-    if ! grep -q "session_recovered" "$LOG_DIR/m4_manager_2.log"; then
-        echo "FAIL: session_recovered was never logged on restart"
         ok=1
     fi
 

@@ -164,6 +164,22 @@ async def test_a_diverging_bitmap_logs_a_warning_naming_both_counts() -> None:
     assert divergences[0]["bitmap_count"] == 3
 
 
+async def test_a_persistent_divergence_warns_exactly_once_per_session() -> None:
+    rig = _rig(shm_crosscheck=True)
+    spec = _spec(total_blocks=8)
+    _init_shm_session(rig.shm, spec)  # bitmap stays empty -- nothing marks it
+    rig.aggregator.register_session(spec)
+
+    with capture_logs() as logs:
+        for block_id in range(5):
+            # UDS count climbs every poll; the bitmap count never leaves 0.
+            rig.aggregator.handle_block_decoded(R0, spec.session_id, [block_id])
+            await rig.aggregator.poll()
+
+    divergences = [entry for entry in logs if entry["event"] == "shm_bitmap_diverges_from_uds"]
+    assert len(divergences) == 1
+
+
 async def test_disabling_the_cross_check_changes_nothing_about_the_outcome() -> None:
     spec = _spec(total_blocks=8)
     block_ids = [0, 1, 3]

@@ -18,9 +18,12 @@ slot_bytes = 4194304
 [aggregation]
 poll_interval_s = 1.0
 stall_timeout_s = 8.0
-# The shm bitmap is a cross-check against the UDS BlockDecoded stream, never
-# the source of truth. Disable only if the mentors rule the shared arena out.
-shm_crosscheck = true
+# The UDS BlockDecoded stream is authoritative and sufficient on its own. The
+# shm bitmap is only ever a redundant cross-check against it -- and until a
+# receiver implementation actually writes that bitmap, every session diverges
+# (bitmap_count stays 0 while the UDS count climbs) and the check is pure
+# noise. Kept off until B confirms his receiver maintains the bitmap.
+shm_crosscheck = false
 
 # count = 0 means "supervise nothing" -- the C++ receiver binary lives in a
 # different repo and will not exist here until it is built or mounted. ports
