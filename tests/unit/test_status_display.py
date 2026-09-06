@@ -3,6 +3,7 @@ import io
 from collections.abc import Sequence
 
 from rich.console import Console
+from structlog.testing import capture_logs
 
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 from session_manager.domain.models import (
@@ -16,6 +17,7 @@ from session_manager.services.status_display import (
     StatusDisplay,
     _loss_style,
     _prominent_if_nonzero,
+    log_status,
     render,
 )
 
@@ -150,12 +152,21 @@ def test_render_emits_ansi_when_force_terminal_and_plain_text_otherwise() -> Non
     assert "\x1b[" not in plain
 
 
-async def test_run_renders_immediately_then_blocks_until_cancelled() -> None:
-    render_calls = 0
+async def _run_briefly(display: StatusDisplay) -> None:
+    run_task = asyncio.create_task(display.run())
+    try:
+        await asyncio.sleep(0)
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+async def test_run_emits_status_immediately_then_blocks_when_not_a_terminal() -> None:
+    provider_calls = 0
 
     def provider() -> Sequence[SessionSnapshot]:
-        nonlocal render_calls
-        render_calls += 1
+        nonlocal provider_calls
+        provider_calls += 1
         return ()
 
     console = Console(file=io.StringIO(), force_terminal=False, width=80)
@@ -166,8 +177,62 @@ async def test_run_renders_immediately_then_blocks_until_cancelled() -> None:
     run_task = asyncio.create_task(display.run())
     try:
         await asyncio.sleep(0)
-        assert render_calls == 1
+        assert provider_calls == 1  # one status line up front, then it blocks on the interval
         assert not run_task.done()
     finally:
         run_task.cancel()
         await asyncio.gather(run_task, return_exceptions=True)
+
+
+def test_log_status_emits_one_event_with_the_same_fields_as_the_tables() -> None:
+    receiver = ReceiverId(1)
+    snapshot = _snapshot(
+        session_id="m4",
+        blocks_decoded=3,
+        total_blocks=10,
+        state=SessionState.OPEN,
+        observed_loss_pct=1.234,
+        per_receiver=((receiver, ReceiverCounters(pkts_ok=42, crc_fail=1)),),
+        live_receivers=frozenset({receiver}),
+    )
+    with capture_logs() as logs:
+        log_status([snapshot])
+
+    events = [entry for entry in logs if entry["event"] == "status"]
+    assert len(events) == 1
+    assert events[0]["sessions"] == [
+        {
+            "session_id": "m4",
+            "state": "OPEN",
+            "blocks_decoded": 3,
+            "total_blocks": 10,
+            "observed_loss_pct": 1.23,
+            "missing_block_count": 0,
+        }
+    ]
+    assert events[0]["receivers"] == [
+        {
+            "receiver_id": 1,
+            "status": "alive",
+            "pkts_ok": 42,
+            "crc_fail": 1,
+            "duplicates": 0,
+            "kernel_drops": 0,
+            "arena_exhausted": 0,
+            "arena_high_water_pct": 0,
+        }
+    ]
+
+
+async def test_run_uses_live_and_logs_nothing_when_a_terminal() -> None:
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=True, width=80)
+    display = StatusDisplay(
+        console, _NeverResolvingClock(), refresh_interval_s=5.0, snapshots_provider=lambda: ()
+    )
+
+    with capture_logs() as logs:
+        await _run_briefly(display)
+
+    assert not any(entry["event"] == "status" for entry in logs)
+    assert "Sessions" in buffer.getvalue()  # rich.Live drew the tables instead

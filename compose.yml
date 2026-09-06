@@ -14,11 +14,13 @@ services:
     # container's default /dev/shm is 64 MB, so create_or_adopt would fail at
     # startup without this.
     shm_size: 512m
-    # The status display is a graded deliverable; rich renders differently
-    # with no TTY (column widths, box drawing, the 80-column truncation guard
-    # from Step 11). Keep a pseudo-TTY so an attached terminal and
-    # `docker compose logs` show the same tables.
-    tty: true
+    # No `tty: true` on the long-running service: a PTY makes rich.Live
+    # repaint the whole status tables into `docker compose logs` on every
+    # refresh, forever, burying every other line. With no TTY the status
+    # display logs one greppable `status` event every few seconds instead
+    # (StatusDisplay._run_logged). For the live tables, run interactively --
+    # `docker compose run --rm session-manager` gets a TTY -- or set
+    # NEXUS_STATUS_FORCE_TERMINAL=true.
     environment:
       NEXUS_STAGING_DIR: /var/nexus/staging
       NEXUS_OUTPUT_DIR: /var/nexus/output
