@@ -305,8 +305,14 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         arena_bytes=config.shm.arena_bytes,
         session_region_base=session_region_base,
     )
+    # force_terminal=False would pin is_terminal OFF even on a real PTY, so
+    # `rich` never live-renders and StatusDisplay's `while True` prints
+    # nothing. None means auto-detect (correct under compose `tty: true`);
+    # the config flag only forces rendering ON, for a no-TTY container whose
+    # tables must still reach `docker compose logs`.
+    force_terminal = True if config.status.force_terminal else None
     status_display = StatusDisplay(
-        Console(force_terminal=config.status.force_terminal),
+        Console(force_terminal=force_terminal),
         clock,
         config.status.refresh_interval_s,
         snapshots_provider=aggregator.snapshots,

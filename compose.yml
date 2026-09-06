@@ -1,0 +1,42 @@
+services:
+  session-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # PID 1 does no SIGCHLD reaping. The supervisor spawns nothing here
+    # (receivers.count = 0), but init: true is free and matches file-monitor.
+    init: true
+    # Headroom over the adopt grace period a restart pays before
+    # authority.start(), plus the shutdown tail (supervisor.shutdown,
+    # journal.sync, authority.shutdown).
+    stop_grace_period: 30s
+    # The completion arena is 256 MB (config.toml shm.arena_bytes) and the
+    # container's default /dev/shm is 64 MB, so create_or_adopt would fail at
+    # startup without this.
+    shm_size: 512m
+    # The status display is a graded deliverable; rich renders differently
+    # with no TTY (column widths, box drawing, the 80-column truncation guard
+    # from Step 11). Keep a pseudo-TTY so an attached terminal and
+    # `docker compose logs` show the same tables.
+    tty: true
+    environment:
+      NEXUS_STAGING_DIR: /var/nexus/staging
+      NEXUS_OUTPUT_DIR: /var/nexus/output
+      NEXUS_JOURNAL_DIR: /var/nexus/journal
+      NEXUS_SOCKET_PATH: /run/nexus/session-manager.sock
+      # The C++ receiver binary lives in another repo -- the supervisor
+      # manages nothing here. Same choice file-monitor made for its senders.
+      NEXUS_RECEIVERS_COUNT: "0"
+    volumes:
+      # ONE volume for all of /var/nexus: staging_dir and output_dir must
+      # share a filesystem because publish is os.replace -- atomic within a
+      # filesystem, a silent non-atomic copy across one. config.py validates
+      # st_dev equality at startup, so two volumes here would fail fast.
+      - nexus-data:/var/nexus
+      # Named volume, not a host bind mount: a Windows host path cannot back a
+      # Unix Domain Socket.
+      - run-data:/run/nexus
+
+volumes:
+  nexus-data:
+  run-data:

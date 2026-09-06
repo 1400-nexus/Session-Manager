@@ -8,6 +8,8 @@ tests
 scripts
 !scripts/entrypoint.sh
 staging
+output
+journal
 run
 bin
 libs/nexus-proto/.git

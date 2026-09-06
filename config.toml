@@ -35,6 +35,10 @@ binary_path = "./bin/nexus-receiver"
 
 [status]
 refresh_interval_s = 0.5
+# false (default) = auto-detect a terminal, which is correct under compose
+# `tty: true`. Set true only for a container run WITHOUT a TTY whose status
+# tables must still show up in `docker compose logs`; it forces rich to
+# render as if attached, it does not disable rendering.
 force_terminal = false
 
 # fec.k / fec.n / fec.symbol_bytes are deliberately absent: they arrive
