@@ -75,6 +75,12 @@ async def _handle_receiver_hello(
 ) -> None:
     context.registry.register(receiver_id)
     logger.info("receiver_connected", receiver_id=receiver_id)
+    # Registry first, unconditionally -- that is what lets a reconnecting
+    # receiver be seen alive during the adopt grace window. Replaying open
+    # sessions has to wait for authority.start(): before it, there is
+    # nothing to replay and _recover() may still be mutating session state.
+    if context.ready.is_set():
+        await context.authority.send_open_sessions_to(receiver_id)
 
 
 async def _handle_heartbeat(
@@ -87,7 +93,7 @@ async def _handle_manifest_seen(
     context: DispatchContext, receiver_id: ReceiverId, message: Any
 ) -> None:
     await context.ready.wait()
-    await context.authority.handle_manifest_seen(message)
+    await context.authority.handle_manifest_seen(receiver_id, message)
 
 
 async def _handle_receiver_stats(
@@ -238,21 +244,11 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
                     "session_open_broadcast_failed", receiver_id=receiver_id, error=str(error)
                 )
 
-    # Session regions are allocated after the session table, which starts
-    # right after the header (see adapters/shm_layout.py) -- the authority
-    # owns this allocation policy, ShmWriter.init_session just takes offsets.
-    session_region_base = SHM_SESSION_TABLE_OFFSET + SHM_SESSION_TABLE_BYTES
-    authority = SessionAuthority(
-        file_lock=file_lock,
-        shm=shm,
-        file_store=file_store,
-        journal=journal,
-        spec_store=spec_store,
-        broadcast=broadcast,
-        shm_name=config.shm.name,
-        arena_bytes=config.shm.arena_bytes,
-        session_region_base=session_region_base,
-    )
+    async def send_to_receiver(receiver_id: ReceiverId, payload: bytes) -> None:
+        try:
+            await ipc.send(receiver_id, payload)
+        except Exception as error:
+            logger.error("session_open_send_failed", receiver_id=receiver_id, error=str(error))
 
     verifier = IntegrityVerifier(hasher, file_store)
     publisher = Publisher(file_store)
@@ -279,9 +275,9 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
     # `aggregator` does not exist yet when `on_complete` is defined above --
     # that's fine, `on_complete`'s body isn't executed until a session
     # actually completes, by which point the assignment below has run.
-    # Constructing it here, ahead of authority.start(), is also what lets
-    # aggregator.run() and status_display.run() be created as ordinary
-    # TaskGroup tasks below rather than needing their own late-bound wiring.
+    # Built before the authority because the authority's on_session_opened
+    # callback is aggregator.register_session -- the one wiring that makes a
+    # fresh session and its progress record impossible to create separately.
     aggregator = ProgressAggregator(
         clock=clock,
         shm_reader=shm,
@@ -290,6 +286,24 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         poll_interval_s=config.aggregation.poll_interval_s,
         stall_timeout_s=config.aggregation.stall_timeout_s,
         shm_crosscheck=config.aggregation.shm_crosscheck,
+    )
+
+    # Session regions are allocated after the session table, which starts
+    # right after the header (see adapters/shm_layout.py) -- the authority
+    # owns this allocation policy, ShmWriter.init_session just takes offsets.
+    session_region_base = SHM_SESSION_TABLE_OFFSET + SHM_SESSION_TABLE_BYTES
+    authority = SessionAuthority(
+        file_lock=file_lock,
+        shm=shm,
+        file_store=file_store,
+        journal=journal,
+        spec_store=spec_store,
+        broadcast=broadcast,
+        send_to_receiver=send_to_receiver,
+        on_session_opened=aggregator.register_session,
+        shm_name=config.shm.name,
+        arena_bytes=config.shm.arena_bytes,
+        session_region_base=session_region_base,
     )
     status_display = StatusDisplay(
         Console(force_terminal=config.status.force_terminal),
@@ -355,19 +369,10 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
             else:
                 authority_ready.set()
 
-                if authority.adopted():
-                    # Seed the aggregator with every session the authority
-                    # could fully recover (spec + decoded blocks) so an
-                    # adopted transfer keeps verifying and publishing
-                    # normally instead of quietly stalling. A session whose
-                    # spec sidecar was itself lost is logged loudly by
-                    # _recover() and stays untracked -- see
-                    # SessionAuthority._recover.
-                    for recovered_spec in authority.recovered_specs():
-                        aggregator.register_session(
-                            recovered_spec,
-                            decoded=authority.recovered_blocks(recovered_spec.session_id),
-                        )
+                # Recovered sessions were already handed to the aggregator by
+                # authority.start() via the on_session_opened callback -- the
+                # same path a fresh session takes -- so there is nothing to
+                # seed here.
 
                 worker_tasks = [
                     ipc_task,

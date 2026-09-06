@@ -61,12 +61,14 @@ def _context(
     registry: ReceiverRegistry | None = None,
     journal: FakeJournal | None = None,
     ready: asyncio.Event | None = None,
+    sends: list[tuple[ReceiverId, bytes]] | None = None,
 ) -> tuple[DispatchContext, FakeClock, FakeShm, ProgressAggregator, FakeJournal]:
     clock = FakeClock()
     registry = registry or ReceiverRegistry(clock, heartbeat_interval_s=5.0)
     shm = FakeShm()
     journal = journal or FakeJournal()
     completed: list[Any] = []
+    sends = sends if sends is not None else []
 
     async def on_complete(snapshot: Any) -> None:
         completed.append(snapshot)
@@ -80,6 +82,10 @@ def _context(
         stall_timeout_s=8.0,
         shm_crosscheck=False,
     )
+
+    async def send_to_receiver(receiver_id: ReceiverId, payload: bytes) -> None:
+        sends.append((receiver_id, payload))
+
     authority = SessionAuthority(
         file_lock=FakeFileLock(),
         shm=shm,
@@ -87,6 +93,8 @@ def _context(
         journal=journal,
         spec_store=FakeSessionSpecStore(),
         broadcast=lambda payload: asyncio.sleep(0),
+        send_to_receiver=send_to_receiver,
+        on_session_opened=aggregator.register_session,
         shm_name="seg",
         arena_bytes=ARENA_BYTES,
         session_region_base=REGION_BASE,
@@ -121,26 +129,90 @@ async def test_handle_heartbeat_refreshes_the_registry() -> None:
     assert context.registry.active_receivers() == frozenset({ReceiverId(1)})
 
 
-async def test_handle_manifest_seen_delegates_to_the_authority() -> None:
-    context, _clock, shm, _aggregator, _journal = _context()
-    await context.authority.start()
-    manifest_seen = rx_pb2.ManifestSeen(
-        receiver_id=1,
+def _manifest_seen(*, receiver_id: int = 1, total_blocks: int = 4) -> Any:
+    return rx_pb2.ManifestSeen(
+        receiver_id=receiver_id,
         manifest=common_pb2.Manifest(
             session_id=str(SESSION),
             filepath="sub/file.bin",
-            file_size=1_120_000,
+            file_size=total_blocks * 280_000,
             file_hash=b"\x00" * 32,
             k=200,
             n=255,
             block_bytes=1400,
-            total_blocks=4,
+            total_blocks=total_blocks,
         ),
     )
 
-    await _handle_manifest_seen(context, ReceiverId(1), manifest_seen)
+
+async def test_handle_manifest_seen_delegates_to_the_authority() -> None:
+    context, _clock, shm, _aggregator, _journal = _context()
+    await context.authority.start()
+
+    await _handle_manifest_seen(context, ReceiverId(1), _manifest_seen())
 
     assert [session.session_id for session in shm.open_sessions()] == [SESSION]
+
+
+async def test_a_fresh_session_is_registered_so_its_blocks_are_not_unknown() -> None:
+    context, _clock, _shm, aggregator, _journal = _context()
+    await context.authority.start()
+
+    await _handle_manifest_seen(context, ReceiverId(1), _manifest_seen(total_blocks=4))
+    decoded = rx_pb2.BlockDecoded(session_id=str(SESSION), receiver_id=1, block_ids=[0, 1])
+    with capture_logs() as logs:
+        await _handle_block_decoded(context, ReceiverId(1), decoded)
+
+    assert not any(entry["event"] == "block_decoded_for_unknown_session" for entry in logs)
+    await aggregator.poll()
+    snapshot = aggregator.snapshot_for(SESSION)
+    assert snapshot is not None
+    assert snapshot.blocks_decoded == 2
+
+
+async def test_a_duplicate_manifest_seen_is_answered_with_session_open_to_that_receiver() -> None:
+    sends: list[tuple[ReceiverId, bytes]] = []
+    context, _clock, _shm, _aggregator, _journal = _context(sends=sends)
+    await context.authority.start()
+
+    await _handle_manifest_seen(context, ReceiverId(1), _manifest_seen())  # creates
+    await _handle_manifest_seen(context, ReceiverId(2), _manifest_seen())  # duplicate
+
+    assert len(sends) == 1
+    receiver_id, payload = sends[0]
+    assert receiver_id == ReceiverId(2)
+    field_name, message = codec.decode(payload)
+    assert field_name == "session_open"
+    assert message.session_id == str(SESSION)  # type: ignore[attr-defined]
+
+
+async def test_receiver_hello_after_a_session_is_open_replays_its_session_open() -> None:
+    sends: list[tuple[ReceiverId, bytes]] = []
+    context, _clock, _shm, _aggregator, _journal = _context(sends=sends)
+    await context.authority.start()
+
+    await _handle_manifest_seen(context, ReceiverId(1), _manifest_seen())
+    sends.clear()
+
+    await _handle_receiver_hello(context, ReceiverId(5), rx_pb2.ReceiverHello(receiver_id=5))
+
+    assert len(sends) == 1
+    receiver_id, payload = sends[0]
+    assert receiver_id == ReceiverId(5)
+    field_name, message = codec.decode(payload)
+    assert field_name == "session_open"
+    assert message.session_id == str(SESSION)  # type: ignore[attr-defined]
+
+
+async def test_receiver_hello_before_authority_start_only_registers() -> None:
+    sends: list[tuple[ReceiverId, bytes]] = []
+    unset_ready = asyncio.Event()  # authority.start() has not run
+    context, _clock, _shm, _aggregator, _journal = _context(sends=sends, ready=unset_ready)
+
+    await _handle_receiver_hello(context, ReceiverId(5), rx_pb2.ReceiverHello(receiver_id=5))
+
+    assert context.registry.active_receivers() == frozenset({ReceiverId(5)})
+    assert sends == []
 
 
 async def test_handle_receiver_stats_uses_the_connection_receiver_id_not_the_payload() -> None:

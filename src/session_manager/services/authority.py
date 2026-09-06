@@ -1,11 +1,11 @@
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import Any
 
 import rx_pb2
 import structlog
 
-from session_manager.domain.ids import BlockId, SessionId
+from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 from session_manager.domain.models import OpenSession, SessionSpec
 from session_manager.domain.paths import is_unsafe_relpath
 from session_manager.ipc import codec
@@ -21,6 +21,12 @@ from session_manager.services.errors import ManifestRejected
 logger = structlog.get_logger(__name__)
 
 Broadcast = Callable[[bytes], Awaitable[None]]
+SendToReceiver = Callable[[ReceiverId, bytes], Awaitable[None]]
+# Called on the one path that opens a session -- fresh create and adopt
+# recovery both -- with the decoded blocks known so far (empty for a fresh
+# session). Wiring registration here rather than at each call site is what
+# stops a new creation path from silently skipping progress tracking.
+OnSessionOpened = Callable[[SessionSpec, Collection[BlockId]], None]
 
 
 def _bitmap_bytes(total_blocks: int) -> int:
@@ -81,6 +87,8 @@ class SessionAuthority:
         journal: Journal,
         spec_store: SessionSpecStore,
         broadcast: Broadcast,
+        send_to_receiver: SendToReceiver,
+        on_session_opened: OnSessionOpened,
         shm_name: str,
         arena_bytes: int,
         session_region_base: int,
@@ -91,12 +99,13 @@ class SessionAuthority:
         self._journal: Journal = journal
         self._spec_store: SessionSpecStore = spec_store
         self._broadcast: Broadcast = broadcast
+        self._send_to_receiver: SendToReceiver = send_to_receiver
+        self._on_session_opened: OnSessionOpened = on_session_opened
         self._shm_name: str = shm_name
         self._arena_bytes: int = arena_bytes
         self._next_offset: int = session_region_base
         self._known: dict[SessionId, OpenSession] = {}
-        self._recovered: dict[SessionId, frozenset[BlockId]] = {}
-        self._recovered_specs: dict[SessionId, SessionSpec] = {}
+        self._specs: dict[SessionId, SessionSpec] = {}
         self._adopted: bool = False
 
     async def start(self) -> None:
@@ -107,10 +116,16 @@ class SessionAuthority:
         if self._adopted:
             await self._recover()
 
-    async def handle_manifest_seen(self, manifest_seen: Any) -> None:
+    async def handle_manifest_seen(self, receiver_id: ReceiverId, manifest_seen: Any) -> None:
         manifest = manifest_seen.manifest
         session_id = SessionId(manifest.session_id)
         if session_id in self._known:
+            # A duplicate is still information this receiver needs: its
+            # ManifestSeen may have arrived after another receiver's won the
+            # create race, or it reconnected after the one broadcast already
+            # went out. SessionOpen is idempotent (see rx.proto), so answer
+            # this receiver directly rather than re-broadcasting.
+            await self._send_session_open(receiver_id, session_id)
             return
 
         spec = _manifest_to_spec(manifest)
@@ -130,20 +145,26 @@ class SessionAuthority:
         # recovers the full spec, not just the decoded blocks.
         self._spec_store.save(spec)
         self._next_offset = region_end
-        self._known[session_id] = OpenSession(
+        open_session = OpenSession(
             session_id=session_id,
             total_blocks=spec.total_blocks,
             block_table_offset=block_table_offset,
             bitmap_offset=bitmap_offset,
         )
+        self._known[session_id] = open_session
+        self._specs[session_id] = spec
+        # Register progress tracking on the SAME path that creates the
+        # session, so a future creation path physically cannot forget to.
+        self._on_session_opened(spec, ())
         logger.info("session_opened", session_id=session_id, total_blocks=spec.total_blocks)
-        await self._broadcast_session_open(spec, block_table_offset, bitmap_offset)
+        await self._broadcast(self._session_open_message(spec, open_session))
 
-    def recovered_blocks(self, session_id: SessionId) -> frozenset[BlockId]:
-        return self._recovered.get(session_id, frozenset())
-
-    def recovered_specs(self) -> tuple[SessionSpec, ...]:
-        return tuple(self._recovered_specs.values())
+    async def send_open_sessions_to(self, receiver_id: ReceiverId) -> None:
+        # A receiver that connects (or reconnects) after a session opened
+        # never saw its broadcast; this is how it learns the session exists
+        # at all -- the path a receiver restart mid-transfer depends on.
+        for session_id in list(self._specs):
+            await self._send_session_open(receiver_id, session_id)
 
     def adopted(self) -> bool:
         return self._adopted
@@ -160,7 +181,6 @@ class SessionAuthority:
             decoded: set[BlockId] = set()
             async for block_id in self._journal.replay(open_session.session_id):
                 decoded.add(block_id)
-            self._recovered[open_session.session_id] = frozenset(decoded)
 
             spec = self._spec_store.load(open_session.session_id)
             if spec is None:
@@ -176,7 +196,8 @@ class SessionAuthority:
                     decoded_blocks=len(decoded),
                 )
                 continue
-            self._recovered_specs[open_session.session_id] = spec
+            self._specs[open_session.session_id] = spec
+            self._on_session_opened(spec, frozenset(decoded))
 
             logger.info(
                 "session_recovered",
@@ -184,9 +205,14 @@ class SessionAuthority:
                 decoded_blocks=len(decoded),
             )
 
-    async def _broadcast_session_open(
-        self, spec: SessionSpec, block_table_offset: int, bitmap_offset: int
-    ) -> None:
+    async def _send_session_open(self, receiver_id: ReceiverId, session_id: SessionId) -> None:
+        spec = self._specs.get(session_id)
+        open_session = self._known.get(session_id)
+        if spec is None or open_session is None:
+            return
+        await self._send_to_receiver(receiver_id, self._session_open_message(spec, open_session))
+
+    def _session_open_message(self, spec: SessionSpec, open_session: OpenSession) -> bytes:
         # Absolute, not spec.relpath: a receiver must write to exactly this
         # path, not reconstruct one against its own idea of a staging
         # directory -- see rx.proto's SessionOpen.dest_path.
@@ -198,7 +224,7 @@ class SessionAuthority:
             k=spec.k,
             n=spec.n,
             block_bytes=spec.symbol_bytes,
-            block_table_offset=block_table_offset,
-            bitmap_offset=bitmap_offset,
+            block_table_offset=open_session.block_table_offset,
+            bitmap_offset=open_session.bitmap_offset,
         )
-        await self._broadcast(codec.encode(session_open))
+        return codec.encode(session_open)

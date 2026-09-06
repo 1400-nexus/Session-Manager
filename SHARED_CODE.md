@@ -4,9 +4,16 @@ Code in this repo that was **copied from `file-monitor`** rather than written
 here. When `file-monitor` fixes a bug in one of these, it has to be carried
 across by hand — there is no shared package. Keep this table honest.
 
-Pin: `libs/nexus-proto` is a submodule pinned to **`cef65a6`**, the same
-commit `file-monitor` uses. A mismatched pin means a mismatched `proto_hash`
-and nothing connects. Check with `git submodule status`.
+Pin: `libs/nexus-proto` is a submodule pinned to **`a83fb3b`**. This is
+ahead of `file-monitor`'s `cef65a6` by two commits, both comment-only edits
+to `rx.proto` (a file `file-monitor` does not use): `SessionOpen.dest_path`
+is now documented as absolute, and `SessionOpen` as idempotent/re-sendable.
+`proto_hash` covers raw `.proto` bytes, so this pin computes a *different*
+hash from `file-monitor`'s — the two services never handshake with each
+other, so that is fine, but **B's C++ receiver must build against `a83fb3b`**
+while his sender stays on `cef65a6` (or bump `file-monitor` too, to realign;
+the generated Python is byte-identical either way). Check with
+`git submodule status`.
 
 ## Verbatim (only `file_monitor` → `session_manager` in imports)
 
