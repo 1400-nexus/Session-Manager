@@ -70,6 +70,17 @@ not match **byte for byte**, `verify_proto_hash` raises `ProtoHashMismatchError`
 and the manager closes your connection (`peer_proto_hash_mismatch` in its log).
 Other receivers on their own connections are unaffected.
 
+At `nexus-proto@7f406db` the digest is:
+
+```
+38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df
+```
+
+(Recompute it — it changes with any `.proto` edit. On a Windows checkout,
+confirm the submodule's `.proto` files came out LF, not CRLF: the raw-bytes
+hash is line-ending sensitive and `nexus-proto/.gitattributes` pins them to
+LF.)
+
 A comment-only edit to any `.proto` changes this hash. That is deliberate — a
 reproducible check that occasionally over-fires beats a canonicalized one that
 quietly diverges between C++ and Python.
