@@ -7,7 +7,9 @@ __pycache__/
 .hypothesis/
 NEXUS_C_GUIDE.md
 PERSON_C_GUIDE.md
-CLAUDE.md
+# CLAUDE.md is tracked -- it shapes every task and belongs under review.
+# Machine-specific overrides go in CLAUDE.local.md (Claude Code reads it too).
+CLAUDE.local.md
 
 /staging/
 /output/
