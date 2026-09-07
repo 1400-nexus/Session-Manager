@@ -124,8 +124,19 @@ domain/           ← pure. imports nothing internal, no third party
 ```
 
 `adapters/` sits beside `services/` and implements the ports. Neither imports
-the other. **`import-linter` enforces this**, so a violation fails `make lint`
-rather than relying on anybody remembering.
+the other.
+
+**How the boundary is actually enforced:** `mypy --strict` plus review. There is
+no `import-linter` and no `Makefile` in either repo — an earlier plan called for
+one and it was never added. The layering holds, but it holds by discipline, not
+by tooling. If it ever starts to slip, adding an `import-linter` contract is the
+cheap fix.
+
+The checks that do exist are run directly:
+
+    ruff check . && ruff format --check .
+    mypy --strict src tests
+    pytest
 
 ### Why this shape, and not something simpler
 
@@ -190,9 +201,9 @@ refused.
 
 Two services, one owner, two weeks — submodule ceremony for shared code would
 cost more than the duplication. `SHARED_CODE.md` in `session-manager` is the
-ledger, and it names the three behaviours where a bug fixed in one must be fixed
-in both: peer identity on reconnect, write-failure teardown, and the
-interruptible backoff sleep.
+ledger, and it names **five** behaviours where a bug fixed in one must be fixed
+in both: peer identity on reconnect, write-failure teardown, the interruptible
+backoff sleep, bind-before-adopt, and the `resource_tracker` double-unregister.
 
 ### The generated protobuf is flat
 
@@ -219,7 +230,7 @@ message and never touches the network.
 |---|---|
 | `domain/ids.py` | `NewType` wrappers so a block id cannot be passed where a symbol id belongs |
 | `domain/models.py` | `SourceFile`, `FecParams` (`block_size = k × symbol_bytes`), `BlockPlan`, `ShardAssignment` — all frozen |
-| `domain/planning.py` | **pure**: block count, byte ranges, shard assignment, K selection |
+| `domain/planning.py` | **pure**: `calculate_block_count`, `compute_block_plans`, `blocks_for_shard`, `derive_shard_assignments`. No K selection — `k` comes straight from config into `FecParams`, unchanged |
 | `adapters/inotify_events.py` | `IN_CLOSE_WRITE` + `IN_MOVED_TO`, with an `IN_Q_OVERFLOW` rescan |
 | `adapters/blake3_hasher.py` | chunked hash, offloaded to a thread |
 | `services/watcher.py` | 200 ms debounce per path; emits stable paths, acts on nothing |
@@ -362,7 +373,7 @@ Three things make adopt safe:
 - **Journal replay** rebuilds the completion set in milliseconds instead of
   re-hashing a gigabyte. Safe because destination writes are idempotent — fixed
   offset, fixed content — so replaying an applied record is harmless. *That is
-  why the journal is ~100 lines and not a write-ahead protocol.*
+  why `append_journal.py` is 147 lines and not a write-ahead protocol.*
 - **The spec sidecar.** A recovered session needs its `SessionSpec` to verify and
   publish. Without it, adopt recovers the blocks and produces a session that
   never completes — worse than failing loudly, because it looks fine.
@@ -413,8 +424,13 @@ the mistake unwriteable rather than merely discouraged.
 Completion is built from `BlockDecoded` over UDS. That is what satisfies the
 brief's IPC requirement, and it is sufficient alone.
 
-The shm bitmap comparison is a removable optimisation, **off by default**
-because no receiver writes bits yet. A milestone run proved it genuinely
+The shm bitmap comparison is a removable optimisation, and it is **off in the
+shipped `config.toml`** because no receiver writes bits yet.
+
+Note the asymmetry: `DEFAULT_SHM_CROSSCHECK` in `constants.py` is `True` — that
+is the value used when the key is *absent*. So "off by default" is true of the
+shipped config and false of the code constant. If you ever hand someone a config
+without that key, the check turns on and starts warning. A milestone run proved it genuinely
 removable — everything passed with it reporting zero. It also warns **once per
 session**, not once per poll: a permanently-firing warning trains everyone to
 ignore the log.
@@ -525,9 +541,14 @@ non-cancelled context.
 
 ### `config.py`
 
-Frozen dataclasses **split per consumer** — `FecConfig`, `PathsConfig`,
-`ShmConfig` — not one god object. Passing a single `Config` into every
-constructor is the most common way dependency inversion quietly dies.
+Frozen dataclasses **split per consumer** — `PathsConfig`, `ShmConfig`,
+`AggregationConfig` and so on — not one god object. Passing a single `Config`
+into every constructor is the most common way dependency inversion quietly dies.
+
+Note two details: `file-monitor` reuses the domain model `FecParams` directly as
+`AppConfig.fec` rather than defining a separate config type, and
+`session-manager` has **no** FEC config at all — those values arrive
+per-session in the Manifest.
 
 Every value overridable by a `NEXUS_*` environment variable. The prefix matters:
 `SOCKET_PATH` colliding between two services in one compose stack is a nasty
@@ -558,9 +579,19 @@ prose meant to be implementable *from the prose*.
 | shm header + session table | `adapters/shm_layout.py`, `adapters/constants.py` | B's receiver |
 | Wire and IPC messages | `nexus-proto` | everyone |
 
-The shm header is 44 bytes packed, the session table starts at offset 64 with
-64-byte entries, and it is **explicit little-endian by choice** — native
-ordering that happens to match today is not a contract.
+The layout, verified with `struct.calcsize`:
+
+| Item | Value |
+|---|---|
+| `SHM_HEADER_FORMAT` | `"<4sI16sIIIQ"` → **44 bytes** |
+| magic / version | `NXRX` / 1 |
+| `SHM_SESSION_TABLE_OFFSET` | 64 |
+| `SHM_SESSION_TABLE_BYTES` | 4096 reserved |
+| `SHM_SESSION_ENTRY_FORMAT` | `"<40sQQQ"` → **64 bytes** |
+| `SHM_SESSION_ID_BYTES` | 40 |
+
+**Explicit little-endian by choice** — native ordering that happens to match
+today is not a contract.
 
 ### The properties teammates cannot infer
 
@@ -601,10 +632,11 @@ the schema implies them:
 | `paths.journal_dir` | `./journal` | also holds the spec sidecars |
 | `paths.lock_path` | `./run/session-manager.lock` | `flock` target |
 | `shm.name` | `nexus-rx` | receivers learn it from `Config` |
-| `shm.arena_bytes` | 268,435,456 | 256 MB → compose needs `shm_size: 512m` |
+| `shm.arena_bytes` | 268,435,456 | 256 MiB → compose needs `shm_size: 512m` |
+| `shm.slot_bytes` | 4,194,304 | 4 MiB → 64 slots; `MIN_ARENA_SLOTS = 4` |
 | `aggregation.poll_interval_s` | 1.0 | must be < `stall_timeout_s` |
 | `aggregation.stall_timeout_s` | 8.0 | |
-| `aggregation.shm_crosscheck` | **false** | off until a receiver writes the bitmap |
+| `aggregation.shm_crosscheck` | **false** | off until a receiver writes the bitmap. **`DEFAULT_SHM_CROSSCHECK` in code is `True`** — the value if the key is absent |
 | `receivers.count` | 0 | 0 = supervise nothing |
 | `status.refresh_interval_s` | 0.5 | Live tables only; the no-TTY path logs every 5 s |
 | `status.force_terminal` | false | **false = auto-detect**, not "off" — see the bug log |
@@ -671,26 +703,35 @@ Three layers, each proving something the others cannot.
 | Contract | one suite, fake + real | s | the fakes match reality |
 | Milestone | real processes, sockets, `/dev/shm` | min | the thing works |
 
-Current: **112 tests / 3 milestones** in `file-monitor`, **265 tests /
-5 milestones** in `session-manager`.
+Current counts — **on Linux**, which is the graded target:
+
+| Repo | Linux | Windows (POSIX tests skipped) | Milestones |
+|---|---|---|---|
+| `file-monitor` | 112 passed | 103 passed, 8 skipped | 3 |
+| `session-manager` | 265 passed | 251 passed, 12 skipped | 5 |
+
+The skips are `AF_UNIX`/`SOCK_SEQPACKET`, `fcntl.flock` and `posix_fallocate` —
+POSIX-only by nature, not disabled. A bare number is misleading if you develop
+on Windows: the local suite is green while a third of the transport layer never
+ran.
 
 ### `file-monitor` milestones
 
-| # | Proves |
-|---|---|
-| 1 | three senders get disjoint shards covering every block |
-| 2 | a dead sender degrades cleanly |
-| 3 | a wrong `proto_hash` is refused, others unaffected |
+| # | Name in `run_milestones.sh` | Proves |
+|---|---|---|
+| 1 | three senders, disjoint and complete | shards cover every block exactly once |
+| 2 | a dead sender degrades cleanly | modulus recomputed over live senders |
+| 3 | a wrong contract hash is refused | handshake rejection, others unaffected |
 
 ### `session-manager` milestones
 
-| # | Proves |
-|---|---|
-| 1 | three receivers, all blocks → verified and published |
-| 2 | withheld blocks → stall → `INCOMPLETE`, nothing published |
-| 3 | corrupted bytes → `HASH_MISMATCH`, quarantined, nothing published |
-| 4 | **`kill -9` mid-transfer → adopt, recover, verify** |
-| 5 | wrong `proto_hash` refused |
+| # | Name in `run_milestones.sh` | Proves |
+|---|---|---|
+| 1 | three stubs, all blocks → VERIFIED | full path to a published, hash-matching file |
+| 2 | withheld blocks → stall timeout → INCOMPLETE | stall fires, nothing published |
+| 3 | one corrupted block → HASH_MISMATCH, quarantined | evidence retained, output empty |
+| 4 | **`kill -9` the manager mid-transfer → restart adopts, recovers, verify** | adopt + journal + sidecar recovery |
+| 5 | wrong `proto_hash` → refused, other stubs unaffected | one bad peer cannot disrupt healthy ones |
 
 **Milestone 4 is the one that matters.** It is the only test exercising
 adopt-vs-create end to end with live peers, and it caught the durability bug no
