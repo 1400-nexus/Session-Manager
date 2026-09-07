@@ -8,3 +8,9 @@
 *.py   text eol=lf
 *.toml text eol=lf
 *.bat  text eol=crlf
+# Redundant -- these live in libs/nexus-proto, whose own .gitattributes
+# governs its checkout (a superproject's attributes do not reach into a
+# submodule). Repeated here so it is visible where it is depended on:
+# proto_hash is over raw .proto bytes, so a CRLF checkout of the submodule
+# computes a different hash at the same pin and the handshake refuses.
+*.proto text eol=lf

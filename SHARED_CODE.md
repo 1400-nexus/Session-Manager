@@ -4,14 +4,39 @@ Code in this repo that was **copied from `file-monitor`** rather than written
 here. When `file-monitor` fixes a bug in one of these, it has to be carried
 across by hand — there is no shared package. Keep this table honest.
 
-Pin: `libs/nexus-proto` is a submodule pinned to **`7f406db`**. `file-monitor`
-is realigned to the same commit. The RX contract has not changed structurally
-since `cef65a6` (the `rx.proto` edits since are comments), but `ipc.proto`
-gained `AssignSession.source_path` for the sender, and `proto_hash` covers
-the raw bytes of every `.proto` — so it has moved several times. **Every
-process that opens a UDS connection must build against this exact commit** —
-a mismatch is a refused connection, not a subtle bug. Check with
-`git submodule status`; `docs/INTEGRATION.md` step 1 carries the digest.
+## Cross-repo state, as of `nexus-proto@7f406db`
+
+| repo | `nexus-proto` pin | state |
+|---|---|---|
+| `session-manager` | `7f406db` | this repo. |
+| `file-monitor` | `7f406db` | realigned. |
+| `sender` (Person A) | `60bd06e` | **five commits behind.** Its `SenderHello.proto_hash` will not match `file-monitor`'s — **the connection is refused**, not subtly wrong. Also missing `AssignSession.source_path` and the `Manifest.sender_id` shard-residue comment. Must bump before any integration. |
+| `receiver` (Person B) | — | one commit, a README. No code yet. |
+
+`proto_hash` is BLAKE3 over the raw bytes of every `*.proto` file, so it moves
+with any edit — a comment included — and it has moved several times. The
+digest at `7f406db` is
+`38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df`, recorded
+in `docs/INTEGRATION.md` step 1, `docs/RECEIVER_CONTRACT.md` §2, and
+`file-monitor/docs/SENDER_CONTRACT.md` §2. Check the pin with
+`git submodule status`.
+
+The RX contract has not changed structurally since `cef65a6` (the `rx.proto`
+edits since — `dest_path` absolute, `SessionOpen` idempotent, `BlockDecoded`
+durable-before-report — are all comments). `ipc.proto` gained
+`AssignSession.source_path` at `7f406db` for the sender; nothing in it changed
+for the RX side.
+
+**Line-ending trap:** `proto_hash` is over raw bytes, so a CRLF checkout of
+the `.proto` files hashes differently at the same pin — `git submodule status`
+shows the right commit and the handshake refuses anyway.
+`nexus-proto/.gitattributes` pins `*.proto` to `eol=lf`, so a **fresh** clone
+is fine, but an *existing* checkout from before that attribute was added keeps
+its CRLF (git does not renormalise on `git checkout <sha>` when the blob is
+unchanged). Fix a stale one with `git -C libs/nexus-proto checkout --force
+HEAD` or re-clone. `*.proto text eol=lf` is also repeated in this repo's
+`.gitattributes` as documentation (a superproject's attributes do not govern
+a submodule).
 
 ## Verbatim (only `file_monitor` → `session_manager` in imports)
 
@@ -51,7 +76,7 @@ the codec was repointed from `ipc_pb2.Envelope` to `rx_pb2.RxEnvelope`.
 | `tests/unit/test_handshake.py` | `tests/unit/test_handshake.py` | `SenderId(1)`→`ReceiverId(1)` in the two `verify_proto_hash` cases. Real-contract digest test unchanged. |
 | `tests/unit/test_codec.py` | `tests/unit/test_codec.py` | Round-trips `ReceiverHello`, `BlockDecoded`, and the cross-package `ipc_pb2.Heartbeat`; rejects an empty `RxEnvelope`. |
 | `tests/integration/test_uds.py` | `tests/integration/test_uds.py` | Real `AF_UNIX`/`SOCK_SEQPACKET` server, `ReceiverHello` handshake, RX message types (`SessionOpen`/`PurgeSession` server→receiver, `BlockDecoded`/`Heartbeat` receiver→server), mismatched `proto_hash` refused, full send queue, write-failure teardown, **and a peer-identity-on-reconnect test**. Skipped (not faked) on a host without `AF_UNIX` — e.g. Windows dev boxes; it runs on the Linux grading machines. |
-| `tests/integration/stub_receiver.py` | `tests/integration/stub_sender.py` | Same structure (argparse, `connect`/heartbeat/receive loops, independent re-derivation of wire arithmetic, `main()`), but the RX side has more to prove: it writes real bytes into the staged file at independently-recomputed offsets (`_block_byte_range`, not imported from `domain.blocks`) and derives a whole `Manifest` — including `file_hash` — from `(--session-id, --blocks)` alone, so three stub processes agree on one file with no coordination. `--exit-after-assignments`/`--expect-refused` (file-monitor's one-shot sender) become an infinite reconnect loop (a receiver has no natural "done"): `_Progress.session_open_seen` persists across reconnects so a resend after a crash doesn't wait forever for a `SessionOpen` the recovered session will never re-broadcast. `--withhold`/`--corrupt` and per-block-paced reporting (`BLOCK_REPORT_PACING_SECONDS`) are new, for milestones 2/3/4. Must not import `session_manager.domain`/`services` — only `ipc.codec`/`ipc.handshake`/`ipc.constants` — same rule as the file it's copied from. |
+| `tests/integration/stub_receiver.py` | `tests/integration/stub_sender.py` | Same structure (argparse, `connect`/heartbeat/receive loops, independent re-derivation of wire arithmetic, `main()`), but the RX side has more to prove: it writes real bytes into the staged file at independently-recomputed offsets (`_block_byte_range`, not imported from `domain.blocks`) and derives a whole `Manifest` — including `file_hash` — from `(--session-id, --blocks)` alone, so three stub processes agree on one file with no coordination. `--exit-after-assignments`/`--expect-refused` (file-monitor's one-shot sender) become an infinite reconnect loop (a receiver has no natural "done"): `_Progress.dest_path` (the absolute path from `SessionOpen`) is cached across reconnects so a resend after a crash doesn't wait forever for a `SessionOpen` the recovered session will never re-broadcast. `--withhold`/`--corrupt`, per-block-paced reporting (`BLOCK_REPORT_PACING_SECONDS`), and `flush + fdatasync before every BlockDecoded` (`_make_durable` — the milestone-4 durability contract) are all new, for milestones 2/3/4. Must not import `session_manager.domain`/`services` — only `ipc.codec`/`ipc.handshake`/`ipc.constants` — same rule as the file it's copied from. |
 | `scripts/run_milestones.sh` | `scripts/run_milestones.sh` | Same skeleton (temp `WORK_DIR`, `trap cleanup EXIT`, `start_*`/`stop_*`, `LAST_STUB_PID` global, `interruptible_sleep`, `record`, a RESULTS table). Five milestones instead of three, driven by `session_manager.main` instead of `file_monitor.main`. Milestone 3 (this repo's numbering) is new: `verify_output_hash` imports `stub_receiver._file_hash` to independently check the published file's actual bytes, not just a log line. Milestone 4 (`kill -9` the manager, restart, assert `adopted=True` + `session_recovered` + a correct republished file) has no file-monitor equivalent — file-monitor has no persistent-adopt-vs-create path to exercise. |
 
 ## Written fresh (patterned on file-monitor, not copied)
@@ -92,11 +117,16 @@ releases every `memoryview` handed out by `bitmap_for` first — you cannot
 tracker()` unregisters each segment from `multiprocessing.resource_tracker`,
 which would otherwise unlink the segment on a clean process exit — the exact
 failure this service exists to prevent; POSIX-only, guarded, uses `_name`
-because typeshed doesn't expose it.
+because typeshed doesn't expose it. `close(unlink=True)` calls
+`reattach_resource_tracker()` first: `SharedMemory.unlink()` unconditionally
+notifies the tracker, and without a matching re-register that is a message
+for a name detach already removed — the tracker child printed a `KeyError`
+traceback on **every clean shutdown** (in every manager log) until this.
 
-`tests/integration/test_shm_contract.py` — the shared contract suite: five
-adopt-vs-create cases parametrised over `FakeShm` and `PosixShm` via a
-`Harness` protocol. This is what keeps the fake honest. Runs on Windows too
+`tests/integration/test_shm_contract.py` — the shared contract suite: six
+adopt-vs-create / lifecycle cases parametrised over `FakeShm` and `PosixShm`
+via a `Harness` protocol (the sixth: create → `close(unlink=True)` → the name
+is free and re-creatable, the traceback regression). Runs on Windows too
 (SharedMemory works there; the harness keeps a handle open because Windows
 frees an unreferenced segment immediately).
 
@@ -194,101 +224,116 @@ adapter can prove: a truncated tail replays every complete record and stops
 silently, a corrupted record stops replay there and logs, and `sync()`
 survives a fresh instance reopening the file.
 
-**Not yet wired:** nothing calls `Journal.append` when a block decodes —
-`ProgressAggregator.handle_block_decoded` doesn't hold a `Journal` reference.
-`SessionAuthority.start()` already calls `replay` on adopt, so the read side
-works; the write side needs wiring in Step 12 (composition root), most
-naturally as an extra call alongside `aggregator.handle_block_decoded` in
-whatever dispatches `BlockDecoded`. **Ordering matters when it's wired:
-`journal.append` first, then fold into the in-memory decoded set.** Folding
-first and crashing before the append loses the block from the journal while
-it was already reported complete — on restart the manager thinks it's
-missing blocks the receivers actually finished writing, and stalls a session
-that was fine.
+**Wired in Step 12:** `main.py`'s `block_decoded` handler calls
+`journal.append` for each in-range block id **before**
+`aggregator.handle_block_decoded` — a failed append raises before any fold
+(`test_a_journal_append_failure_stops_that_block_reaching_the_aggregator`
+pins this). Folding first and crashing before the append would lose the
+block from the journal while it was reported complete; on restart the
+manager would think it's missing blocks the receivers finished writing and
+stall a session that was fine.
 
 `src/session_manager/services/status_display.py` — the graded status
-display. Split in two per the brief: `render(snapshots) -> RenderableType`
-is pure (no clock, no state, no I/O — this is why `SessionSnapshot` exists),
-`StatusDisplay` is the thin `rich` `Live` driver that calls it every
-`refresh_interval_s`. `crc_fail`/`kernel_drops`/`arena_exhausted` render
-bold-red when non-zero — three unrelated failure modes (corrupting router,
-slow host, decode falling behind) whose fixes have nothing in common, so the
-display is what tells you which one you have. Session loss % is styled
-green/yellow/red against `services/constants.py` thresholds so it reads at a
-glance. **Receiver table headers are abbreviated** (`aexh`, `hwm%`, `kdrops`)
-— the full field names overflowed and Rich truncated them to unreadable
-fragments at an 80-column width, which is exactly the width `docker compose
-logs` assumes when it can't detect a real terminal size; verified by
-re-rendering at 72/80/100/120 columns, not just eyeballed at one width.
-`pyproject.toml` gained `rich` and dropped `inotify-simple` (dead since
-Step 3 pruned `FileEvents` — nothing ever imported it).
+display. `render(snapshots) -> RenderableType` is pure (no clock, no state,
+no I/O — this is why `SessionSnapshot` exists). `StatusDisplay.run()`
+branches on `Console.is_terminal`: with a TTY it drives `rich.Live` at
+`refresh_interval_s`; **with no TTY** it emits one structured `status` log
+event every `STATUS_LOG_INTERVAL_SECONDS` (5 s) carrying the same fields
+(`log_status`), because `Live` on a pipe repaints the whole tables into
+`docker compose logs` on every refresh and buries every other line. `main.py`
+passes `Console(force_terminal=True if config.status.force_terminal else
+None)` — `None` is auto-detect; the config flag is force-*on* only, since
+`force_terminal=False` in rich means force-*off* even on a real PTY (that
+wiring bug produced zero status output until it was caught by looking at the
+container). `crc_fail`/`kernel_drops`/`arena_exhausted` render bold-red when
+non-zero — three unrelated failure modes. **Receiver headers are abbreviated**
+(`aexh`, `hwm%`, `kdrops`): the full names overflowed and Rich truncated them
+to unreadable fragments at 80 columns, verified re-rendering at 72/80/100/120.
+`pyproject.toml` gained `rich` and dropped `inotify-simple`.
 
-`src/session_manager/main.py` — the composition root. The only file that
-imports both adapters and services. Startup order: proto-hash check →
-construct adapters → `authority.start()` (flock, then `create_or_adopt`,
-before anything else touches shm) → five tasks under one `TaskGroup`
-(`ipc.serve`, `supervisor.run`, the dispatch loop, `aggregator.run`,
-`status_display.run`) → log listening. Shutdown via an `asyncio.Event` set
-from a signal handler plus a small watcher task that cancels the five
-workers — never self-cancellation, copied from `file-monitor`'s `main.py`
-(which really did have this bug once). `run()` takes an optional
-`shutdown_event` param so a test can trigger shutdown directly instead of
-sending a real OS signal.
+`src/session_manager/main.py` — the composition root, the only file importing
+both adapters and services. Everything is constructed first (adapters,
+`aggregator`, then `authority` with `on_session_opened=aggregator.register_
+session`), then inside one `TaskGroup`:
 
-Small additions made while wiring, not deferred to a later step:
-- `services/receiver_registry.py` (`ReceiverRegistry`) — new; mirrors
-  file-monitor's `SenderRegistry` exactly (three missed heartbeats, not
-  one). `active_receivers` doubles as `ProgressAggregator`'s
-  `live_receivers` callable; `any_alive` as `PosixShm`'s
-  `probe_receiver_alive` — "does a receiver answer on the socket" is
-  literally what this registry tracks.
-- `domain/blocks.py` (`block_byte_range`) — `BlockDecoded` carries only a
-  `block_id`, never a byte range, so the journal needs this pure helper to
-  recompute `(offset, length)` from the spec before it can append.
-- `ProgressAggregator.spec_for()` and `.snapshots()` — the dispatch loop
-  needs the former to compute journal offsets for `block_decoded`; the
-  status display needs the latter to enumerate all sessions. Both trivial,
-  additive, `snapshots()` returns a tuple over the internal dict's values.
-- `ProgressAggregator.handle_receiver_stats` now takes `receiver_id`
-  explicitly instead of reading `stats.receiver_id` — a real inconsistency
-  in the Step 7 code, caught while wiring: `handle_block_decoded` already
-  trusted the connection's verified identity, not the payload; stats was
-  the odd one out.
+1. `ipc.serve()` and the dispatch loop start **immediately** — a receiver
+   reconnecting after a crash needs somewhere to say `ReceiverHello` before
+   the adopt decision is made. `receiver_hello` / `heartbeat` are handled
+   ungated; `manifest_seen` / `block_decoded` `await` a `ready` event.
+2. wait for the socket file, then up to `ADOPT_GRACE_PERIOD_SECONDS` (1.5 s)
+   for `registry.any_alive()`.
+3. `authority.start()` — flock, `create_or_adopt`, `_recover()` on adopt.
+   `LockHeldError` routes to the common cleanup tail, not an early return.
+4. set `ready`; create the other three workers (`supervisor.run`,
+   `aggregator.run`, `status_display.run`) and the shutdown watcher; log
+   `session_manager_listening adopted=<bool>`.
 
-**The dispatch loop's `block_decoded` handler is where the Step 10 ordering
-constraint actually lives**: for each in-range block id it calls
-`journal.append` before `aggregator.handle_block_decoded`, and a failed
-append raises before any fold happens (`test_a_journal_append_failure_stops_
-that_block_reaching_the_aggregator` pins this).
+Without step 1–2, `probe_receiver_alive()` is checked before the socket is
+even bound, so a real crash+restart always reinitialises instead of adopting.
+Shutdown via an `asyncio.Event` + a watcher task that cancels the workers —
+never self-cancellation (copied from file-monitor, which had that bug).
+`run(config, shutdown_event=None)` for tests.
 
-**The adopted-sessions gap above is now fixed** (same day, before Step 13):
+Wiring-time additions:
+- `services/receiver_registry.py` (`ReceiverRegistry`) — mirrors
+  file-monitor's `SenderRegistry` (three missed heartbeats:
+  `HEARTBEAT_INTERVAL_SECONDS` 5.0 × `MISSED_HEARTBEAT_LIMIT` 3 = 15 s).
+  `active_receivers` is the aggregator's `live_receivers`; `any_alive` is
+  `PosixShm`'s `probe_receiver_alive`.
+- `domain/blocks.py` (`block_byte_range`) — recomputes `(offset, length)`
+  from the spec since `BlockDecoded` carries only a `block_id`.
+- `ProgressAggregator.spec_for()` / `.snapshots()`; `handle_receiver_stats`
+  takes `receiver_id` explicitly (Step 7 inconsistency — `handle_block_
+  decoded` already trusted the connection, stats was the odd one out).
+- the `block_decoded` handler calls `journal.append` per in-range id
+  **before** `aggregator.handle_block_decoded` (see the journal section).
+
 `src/session_manager/adapters/json_session_spec_store.py`
-(`JsonSessionSpecStore`) persists the full `SessionSpec` as a JSON sidecar,
-one file per session, next to its journal file (`journal_dir/<session_id>
-.spec.json`) — a Python-only file, not a widened on-segment session table,
-so B's receivers never need to parse it. New port
-`ports/protocols.SessionSpecStore` (`save` / `load` / `delete`);
-`SessionAuthority` gained a `spec_store` constructor param, calls
-`spec_store.save(spec)` right after `init_session` succeeds in
-`handle_manifest_seen` (durable before the `SessionOpen` broadcast), and
-`_recover()` now calls `spec_store.load()` per adopted session, populating
-`recovered_specs()` alongside the existing `recovered_blocks()`. `main.py`
-wires `JsonSessionSpecStore(config.paths.journal_dir)` in and, after
-`authority.start()`, registers every `authority.recovered_specs()` result
-with the aggregator (`decoded=` from `recovered_blocks()`) — replacing the
-log-only gap warning entirely. A session whose sidecar is itself lost
-(corrupt JSON, missing field, deleted) logs
-`session_spec_missing_on_recovery` / `session_spec_corrupt` loudly and stays
-`_known` but unregistered, rather than either crashing or (worse)
-re-`init_session`-ing and zeroing a bitmap a live receiver is still writing
-into — decoded blocks and shm bytes are still safe, only verify/publish for
-that one session is lost.
-`domain/paths.py` gained `is_unsafe_filename_component`, factored out of
-`AppendJournal._path_for` (which now uses it too) so the "session_id becomes
-a filename" hazard has one check, not two independently-drifting copies.
-Fourth contract-test outing:
-`tests/integration/test_session_spec_store_contract.py` runs
-save/load/delete against `FakeSessionSpecStore` and `JsonSessionSpecStore`.
+(`JsonSessionSpecStore`, port `SessionSpecStore` — `save`/`load`/`delete`)
+persists the full `SessionSpec` as a JSON sidecar, one per session next to
+its journal file (`journal_dir/<session_id>.spec.json`) — Python-only, not a
+widened on-segment table, so B's receivers never parse it. `SessionAuthority`
+`save`s it right after `init_session`, durable before the `SessionOpen`
+broadcast. On adopt, `_recover()` `load`s it per open session and calls
+`on_session_opened(spec, decoded_from_journal)` — the **same callback** a
+fresh `handle_manifest_seen` calls, so a recovered session is registered
+with the aggregator on exactly the path a new one is (there is no separate
+seeding loop in `main.py` any more, and no `recovered_specs()` /
+`recovered_blocks()` accessors — `authority.was_recovered(session_id)` is all
+that's left). A session whose sidecar is lost logs
+`session_spec_missing_on_recovery` / `session_spec_corrupt` and stays
+`_known` but unregistered — decoded blocks and shm bytes are still safe,
+only verify/publish for that one session is lost.
+`domain/paths.py` gained `is_unsafe_filename_component` (shared by
+`AppendJournal._path_for` and the spec store). Fourth contract-test outing:
+`tests/integration/test_session_spec_store_contract.py`.
+
+`SessionAuthority` also sends **`Config`** (`shm_name` / `staging_dir` /
+`journal_dir`) to each receiver right after its `ReceiverHello`
+(`send_config_to`), replays a `SessionOpen` for every open session on that
+hello once `ready` is set (`send_open_sessions_to`), and answers a
+**duplicate** `ManifestSeen` with a targeted `SessionOpen` rather than a
+re-broadcast. `main.py` broadcasts **`PurgeSession`** when a session goes
+terminal — `verified` / `hash_mismatch` from the `on_complete` closure,
+`incomplete` from a new `ProgressAggregator` `on_stalled` callback (fires
+once). Both messages existed in `rx.proto` unsent until this.
+
+**Milestone-4 durability:** a block reported before its bytes are durable is
+a hole in the recovered file (the manager journals the report and, on adopt,
+never re-asks). `rx.proto`'s `BlockDecoded` and `RECEIVER_CONTRACT.md` §5
+make write+fsync-before-report a hard receiver requirement;
+`tests/integration/stub_receiver.py` `fdatasync`s each block. `main.py` logs
+`recovered_session_failed_verification` when a hash mismatch follows an
+adopt, to separate a recovery hole from FEC corruption
+(`SessionAuthority.was_recovered`).
+
+`ProgressAggregator` — `mark_verified` / `mark_hash_mismatch` move a session
+into the `VERIFIED` / `HASH_MISMATCH` terminal states (defined since Step 1,
+never set until Step 13); `poll()` skips terminal sessions so the outcome
+isn't recomputed back to `COMPLETE`. The shm cross-check warns **once per
+session** (`_crosscheck_warned`), not every poll — a permanent divergence
+was 300 identical lines otherwise; `aggregation.shm_crosscheck` defaults to
+`false` (config.toml) until a receiver actually writes the bitmap.
 
 **Windows dev-loop note:** `FlockFileLock` (`import fcntl`) is imported
 lazily inside `run()`, not at module scope, so `import session_manager.main`
@@ -302,12 +347,21 @@ tests.
 
 ## Config / build (renamed, structure kept)
 
-`pyproject.toml`, `Dockerfile`, `.dockerignore`, `scripts/entrypoint.sh`,
-`.gitignore`, `.env.example` — package renamed `file-monitor`/`file_monitor`
-→ `session-manager`/`session_manager`; container paths renamed to the RX
-schema (`NEXUS_WATCH_PATH` → `NEXUS_STAGING_DIR`, plus `NEXUS_OUTPUT_DIR` /
+`pyproject.toml`, `Dockerfile`, `.dockerignore`, `compose.yml`,
+`scripts/entrypoint.sh`, `.gitignore`, `.gitattributes`, `.env.example` —
+package renamed `file-monitor`/`file_monitor` → `session-manager`/
+`session_manager`; container paths renamed to the RX schema
+(`NEXUS_WATCH_PATH` → `NEXUS_STAGING_DIR`, plus `NEXUS_OUTPUT_DIR` /
 `NEXUS_JOURNAL_DIR` / `NEXUS_RUN_DIR` / `NEXUS_LOCK_PATH`); socket basename
-changed. **The hatch `force-include` of
+changed. `compose.yml` has three RX-specific settings — `shm_size: 512m`
+(the arena is 256 MB, the container default `/dev/shm` is 64 MB), one named
+volume for all of `/var/nexus` (staging and output must share a filesystem —
+`os.replace`), `NEXUS_RECEIVERS_COUNT=0` — and deliberately **no** `tty: true`
+(a PTY makes `rich.Live` spam the logs; the no-TTY `status` line is the
+container path). `.gitattributes` pins `*.sh`/`*.py`/`*.toml`/`*.proto` to
+`eol=lf` — a Windows clone (`core.autocrlf=true`) otherwise checks out
+`run_milestones.sh` with CRLF and it fails under Linux bash. **The hatch
+`force-include` of
 `libs/nexus-proto/generated/python` at the wheel root is kept** — the flat
 proto modules (`rx_pb2.py` does `import common_pb2`) must land on `sys.path`,
 never nested in a package:
@@ -321,7 +375,7 @@ Without that block the container build succeeds and the process dies on
 `import rx_pb2` at runtime — and the `conftest.py` `sys.path` insert would
 hide it from the test suite, so this is verified by eye, not by a test.
 
-## The three that took several rounds each (in `uds.py` / `supervisor.py`)
+## The multi-round ones (in `uds.py` / `supervisor.py` / `posix_shm.py` / `main.py`)
 
 1. **Peer identity on reconnect.** A peer that reconnects gets a *new*
    `send_queue`; `_peers[receiver_id]` is overwritten on the new handshake.
@@ -347,8 +401,23 @@ hide it from the test suite, so this is verified by eye, not by a test.
    30 seconds. Covered by
    `test_shutdown_during_backoff_window_exits_without_waiting_out_the_delay`.
 
+4. **Bind before adopt** (`main.py`). `create_or_adopt`'s adopt path checks
+   `probe_receiver_alive()`, which reads the registry, which is populated by
+   handshakes, which need a bound socket. The original order ran
+   `authority.start()` before `ipc.serve()`, so a manager restart always saw
+   an empty registry and reinitialised the segment a live receiver was
+   still using. Fixed by starting the socket + dispatch loop first, gating
+   only `manifest_seen`/`block_decoded` on a `ready` event, and waiting out
+   `ADOPT_GRACE_PERIOD_SECONDS` for a reconnect. Milestone 4 exercises it;
+   `test_main_dispatch.py` covers the gating.
+
+5. **resource_tracker double-unregister** (`posix_shm.py`) — see the
+   `reattach_resource_tracker` note above.
+
 ## Done when
 
 - `python -c "import rx_pb2, common_pb2"` succeeds
   (`PYTHONPATH=libs/nexus-proto/generated/python`).
-- `pytest` runs green (`test_uds.py` skips off-POSIX).
+- `ruff check`, `ruff format --check`, `mypy --strict` clean; `pytest` green
+  (`fcntl`/`AF_UNIX` tests skip off-POSIX); `scripts/run_milestones.sh` 5/5
+  on Linux.

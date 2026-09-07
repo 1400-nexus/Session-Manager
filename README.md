@@ -31,9 +31,14 @@ publisher, receiver-liveness tracking, and the status display; `main.py` is the
 composition root that wires everything into one process under an
 `asyncio.TaskGroup`.
 
-The receiver-facing wire contract is in
-[`docs/RECEIVER_CONTRACT.md`](docs/RECEIVER_CONTRACT.md); the integration plan is
-in [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+## Documentation
+
+| Document | Answers |
+|---|---|
+| [`docs/RECEIVER_CONTRACT.md`](docs/RECEIVER_CONTRACT.md) | Everything a C++ receiver needs to talk to `session-manager` — transport, the `proto_hash` handshake, message flow, the five properties that bite, the shm header layout. |
+| [`docs/INTEGRATION.md`](docs/INTEGRATION.md) | The step-by-step integration plan, each step isolating one variable, with the failure diagnosis for each. Carries the current pin and digest (step 1). |
+| [`SHARED_CODE.md`](SHARED_CODE.md) | What was copied from `file-monitor` vs written fresh, and the cross-repo pin state. |
+| [`file-monitor/docs/SENDER_CONTRACT.md`](../file-monitor/docs/SENDER_CONTRACT.md) | The TX-side equivalent of `RECEIVER_CONTRACT.md`, for a C++ sender against `file-monitor`. |
 
 ## Setup
 
