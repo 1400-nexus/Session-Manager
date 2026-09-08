@@ -65,6 +65,7 @@ Python is committed there. Regenerate with `libs/nexus-proto/compile.sh`
 | `docs/GUIDE.md` | The whole control plane in one pass — architecture, ports-and-adapters and why, both service walkthroughs, the shared machinery, cross-language contracts, config reference, how it is proven, a bug log. Verified against the code. **Start here.** |
 | `docs/RECEIVER_CONTRACT.md` | What B's C++ receiver implements against — transport, the `proto_hash` handshake, message flow, the properties that bite, the shm header layout. |
 | `docs/INTEGRATION.md` | The step-by-step integration order, one variable at a time, with the failure diagnosis for each step. |
+| `docs/PURGE_ARC.md` | What a terminal session leaves on disk beyond the `PurgeSession` trigger — the INCOMPLETE quarantine + missing-blocks report, session-id filenames, `_recover`'s refusal of a session with no staged file (+ remedy), the render-time FAILED state. Read before touching `authority.purge` / `_tear_down` / `_recover` or the quarantine adapters. |
 | `SHARED_CODE.md` | What was copied from `file-monitor` vs written fresh, and the behaviours where a bug fixed in one must be fixed in both. |
 
 ## Design Principles & Standards

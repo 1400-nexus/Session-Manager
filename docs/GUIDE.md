@@ -392,6 +392,10 @@ publish only what verified, display status. Its entire authoritative state for a
    **FAILED** with a blank Idle cell — derived at render time from
    `is_purged()`, so it does not read as a still-live `OPEN` row.
 
+   [`PURGE_ARC.md`](PURGE_ARC.md) collects the on-disk consequences of all
+   this in one page: the quarantine + report, the session-id filenames, and
+   what `session_staged_file_missing_on_recovery` means when you hit it.
+
 ### Adopt-vs-create: the sharpest edge in the system
 
 If the manager restarts while receivers are alive, it must **adopt** the

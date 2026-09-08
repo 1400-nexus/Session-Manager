@@ -38,6 +38,7 @@ composition root that wires everything into one process under an
 | [`docs/GUIDE.md`](docs/GUIDE.md) | The whole control plane in one pass — the one-way constraint, topology, ports-and-adapters, both service walkthroughs, the shared machinery, cross-language contracts, config, how it is proven, a bug log, and what is still open. Start here. |
 | [`docs/RECEIVER_CONTRACT.md`](docs/RECEIVER_CONTRACT.md) | Everything a C++ receiver needs to talk to `session-manager` — transport, the `proto_hash` handshake, message flow, the five properties that bite, the shm header layout. |
 | [`docs/INTEGRATION.md`](docs/INTEGRATION.md) | The step-by-step integration plan, each step isolating one variable, with the failure diagnosis for each. Carries the current pin and digest (step 1). |
+| [`docs/PURGE_ARC.md`](docs/PURGE_ARC.md) | What a terminal session leaves on disk — the INCOMPLETE quarantine + report, the session-id filenames, why `_recover` refuses a session with no staged file (and the remedy), the render-time FAILED state. |
 | [`SHARED_CODE.md`](SHARED_CODE.md) | What was copied from `file-monitor` vs written fresh, and the cross-repo pin state. |
 | [`file-monitor/docs/SENDER_CONTRACT.md`](../file-monitor/docs/SENDER_CONTRACT.md) | The TX-side equivalent of `RECEIVER_CONTRACT.md`, for a C++ sender against `file-monitor`. |
 
