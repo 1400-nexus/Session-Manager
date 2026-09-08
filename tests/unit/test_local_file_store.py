@@ -1,9 +1,13 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
 
+from session_manager.adapters.constants import INCOMPLETE_REPORT_FILENAME_SUFFIX
 from session_manager.adapters.local_file_store import LocalFileStore
+from session_manager.domain.ids import BlockId, SessionId
+from session_manager.domain.models import IncompleteReport
 
 
 def _store(tmp_path: Path) -> LocalFileStore:
@@ -104,3 +108,85 @@ def test_quarantine_preserves_content_and_never_reaches_output(tmp_path: Path) -
     assert quarantined.read_bytes() == b"junk!"
     assert not staged.exists()
     assert not (tmp_path / "output" / "output.bin").exists()
+
+
+def test_quarantine_incomplete_keeps_the_partial_byte_identical_and_writes_the_report(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    staged = store.allocate("sub/part.bin", 9)
+    partial_bytes = b"abc\x00\x00\x00ghi"  # a non-contiguous gap in the middle
+    staged.write_bytes(partial_bytes)
+    report = IncompleteReport(
+        session_id=SessionId("abc123"),
+        total_blocks=9,
+        decoded_blocks=6,
+        missing_block_ids=(BlockId(3), BlockId(4), BlockId(5)),
+    )
+
+    quarantined = store.quarantine_incomplete("sub/part.bin", report)
+
+    assert quarantined == tmp_path / "staging" / "quarantine" / "sub" / "part.abc123.bin"
+    assert quarantined.read_bytes() == partial_bytes
+    assert not staged.exists()
+    report_path = quarantined.with_name(f"{quarantined.name}{INCOMPLETE_REPORT_FILENAME_SUFFIX}")
+    assert json.loads(report_path.read_text()) == {
+        "session_id": "abc123",
+        "total_blocks": 9,
+        "decoded_blocks": 6,
+        "missing_block_ids": [3, 4, 5],
+    }
+
+
+def test_quarantine_incomplete_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.allocate("part.bin", 4)
+    report = IncompleteReport(
+        session_id=SessionId("s"),
+        total_blocks=4,
+        decoded_blocks=0,
+        missing_block_ids=(BlockId(0), BlockId(1), BlockId(2), BlockId(3)),
+    )
+
+    store.quarantine_incomplete("part.bin", report)
+
+    quarantine_dir = tmp_path / "staging" / "quarantine"
+    assert [p.name for p in sorted(quarantine_dir.iterdir())] == [
+        "part.s.bin",
+        f"part.s.bin{INCOMPLETE_REPORT_FILENAME_SUFFIX}",
+    ]
+
+
+def test_two_incomplete_transfers_of_one_relpath_keep_both_partials_and_reports(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    store.allocate("report.bin", 3).write_bytes(b"aaa")
+    store.quarantine_incomplete(
+        "report.bin",
+        IncompleteReport(
+            session_id=SessionId("aaaa1111"),
+            total_blocks=3,
+            decoded_blocks=1,
+            missing_block_ids=(BlockId(1), BlockId(2)),
+        ),
+    )
+    store.allocate("report.bin", 3).write_bytes(b"bbb")
+    store.quarantine_incomplete(
+        "report.bin",
+        IncompleteReport(
+            session_id=SessionId("bbbb2222"),
+            total_blocks=3,
+            decoded_blocks=2,
+            missing_block_ids=(BlockId(2),),
+        ),
+    )
+
+    quarantine_dir = tmp_path / "staging" / "quarantine"
+    assert (quarantine_dir / "report.aaaa1111.bin").read_bytes() == b"aaa"
+    assert (quarantine_dir / "report.bbbb2222.bin").read_bytes() == b"bbb"
+    first = json.loads((quarantine_dir / "report.aaaa1111.bin.incomplete.json").read_text())
+    second = json.loads((quarantine_dir / "report.bbbb2222.bin.incomplete.json").read_text())
+    assert first["missing_block_ids"] == [1, 2]
+    assert second["missing_block_ids"] == [2]

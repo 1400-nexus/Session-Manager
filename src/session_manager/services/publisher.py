@@ -2,7 +2,7 @@ from pathlib import Path
 
 import structlog
 
-from session_manager.domain.models import SessionSpec
+from session_manager.domain.models import IncompleteReport, SessionSpec
 from session_manager.domain.paths import is_unsafe_relpath
 from session_manager.ports.protocols import FileStore
 from session_manager.services.errors import PublishRejected
@@ -35,6 +35,23 @@ class Publisher:
         self._reject_unsafe(spec.relpath)
         quarantined_path = self._file_store.quarantine(spec.relpath)
         logger.error("session_quarantined", session_id=spec.session_id, path=str(quarantined_path))
+        return quarantined_path
+
+    def quarantine_incomplete(self, spec: SessionSpec, report: IncompleteReport) -> Path:
+        # The sweep's terminal path for a stalled session: same move as
+        # `quarantine`, plus a record of what the partial holds. A distinct
+        # log event from `session_quarantined` -- that one means a hash
+        # mismatch, and downstream (the milestone harness included) reads it
+        # that way.
+        self._reject_unsafe(spec.relpath)
+        quarantined_path = self._file_store.quarantine_incomplete(spec.relpath, report)
+        logger.warning(
+            "incomplete_partial_quarantined",
+            session_id=spec.session_id,
+            path=str(quarantined_path),
+            decoded_blocks=report.decoded_blocks,
+            missing_block_count=len(report.missing_block_ids),
+        )
         return quarantined_path
 
     def _reject_unsafe(self, relpath: str) -> None:

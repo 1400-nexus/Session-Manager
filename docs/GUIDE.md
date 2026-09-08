@@ -352,14 +352,27 @@ publish only what verified, display status. Its entire authoritative state for a
    in the authority calls it for every open session, which is the only thing
    that catches the session that just went *silent* — `INCOMPLETE` is the
    absence of `BlockDecoded`, so nothing event-driven ever fires it. A session
-   is announced exactly once, and purge then **tears down its durable footprint**
-   — shm session-table entry, spec sidecar, journal file — so an adopting
-   restart cannot re-recover it and re-broadcast `SessionOpen` for something
-   the receivers were told is finished. A late `BlockDecoded` after purge is
-   dropped at debug; a resent `ManifestSeen` is ignored. On adopt, a recovered
-   session's stall clock starts at the adoption instant (the aggregator stamps
-   `last_progress_at` when `_recover` registers it), not its original open
-   time — otherwise a restart purges every live transfer on the first sweep.
+   is announced exactly once. On `INCOMPLETE`, purge first moves the partial
+   into `quarantine/` (`Publisher.quarantine_incomplete`), named
+   `<stem>.<session_id><ext>` so two stalled transfers of one filename in a
+   run don't clobber each other, with a `<that name>.incomplete.json` beside
+   it — `{session_id, total_blocks, decoded_blocks, missing_block_ids}`, the
+   full missing list read from the journal — because a partially-received
+   file is evidence of what the link delivered, same as a hash mismatch, not
+   scratch to reap. That report is written (atomically) *before* purge
+   **tears down the durable footprint** — shm session-table entry, spec
+   sidecar, journal file — so an adopting restart cannot re-recover it and
+   re-broadcast `SessionOpen` for something the receivers were told is
+   finished, and the journal is only unlinked once the report derived from
+   it is safe. If that ordering is ever broken by a crash — sidecar left but
+   partial gone — `_recover` refuses to adopt the session (logs
+   `session_staged_file_missing_on_recovery` with the remedy), rather than
+   rebuilding a session whose bytes no longer exist. A late `BlockDecoded`
+   after purge is dropped at debug; a resent `ManifestSeen` is ignored. On
+   adopt, a recovered session's stall clock starts at the adoption instant
+   (the aggregator stamps `last_progress_at` when `_recover` registers it),
+   not its original open time — otherwise a restart purges every live
+   transfer on the first sweep.
    The status display's **Idle** column shows time-since-last-block, styled
    yellow past half the stall timeout and red past 90%.
 
@@ -746,7 +759,7 @@ ran.
 | # | Name in `run_milestones.sh` | Proves |
 |---|---|---|
 | 1 | three stubs, all blocks → VERIFIED | full path to a published, hash-matching file |
-| 2 | withheld blocks → stall timeout → INCOMPLETE | stall fires, nothing published |
+| 2 | withheld blocks → stall timeout → INCOMPLETE | stall fires, nothing published, partial quarantined with a missing-blocks report |
 | 3 | one corrupted block → HASH_MISMATCH, quarantined | evidence retained, output empty |
 | 4 | **`kill -9` the manager mid-transfer → restart adopts, recovers, verify** | adopt + journal + sidecar recovery |
 | 5 | wrong `proto_hash` → refused, other stubs unaffected | one bad peer cannot disrupt healthy ones |

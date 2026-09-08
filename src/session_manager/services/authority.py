@@ -1,14 +1,16 @@
 import asyncio
 import math
 from collections.abc import Awaitable, Callable, Collection
+from pathlib import Path
 from typing import Any
 
 import rx_pb2
 import structlog
 
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
-from session_manager.domain.models import OpenSession, SessionSpec
+from session_manager.domain.models import IncompleteReport, OpenSession, SessionSpec
 from session_manager.domain.paths import is_unsafe_relpath
+from session_manager.domain.progress import missing_blocks
 from session_manager.domain.purge_policy import (
     PurgeReason,
     SessionProgress,
@@ -44,6 +46,11 @@ DecodedProgress = Callable[[SessionId], tuple[int, float, tuple[BlockId, ...]] |
 # Told the aggregator a session's terminal outcome so the status display
 # stops rebuilding its snapshot -- same shape as mark_verified / _hash_mismatch.
 MarkTerminal = Callable[[SessionId], None]
+# Move a stalled session's partial into quarantine/ with its missing-blocks
+# report -- Publisher.quarantine_incomplete. Injected rather than reached for
+# directly so the authority stays out of the output/quarantine directories,
+# same as it never publishes.
+QuarantineIncomplete = Callable[[SessionSpec, IncompleteReport], Path]
 
 # PurgeReason -> the wire string PurgeSession.reason has always carried.
 # rx.proto keeps `reason` a free-text string (see RECEIVER_CONTRACT.md s4),
@@ -119,6 +126,7 @@ class SessionAuthority:
         clock: Clock,
         progress_of: DecodedProgress,
         on_incomplete: MarkTerminal,
+        quarantine_incomplete: QuarantineIncomplete,
         shm_name: str,
         staging_dir: str,
         journal_dir: str,
@@ -138,6 +146,7 @@ class SessionAuthority:
         self._clock: Clock = clock
         self._progress_of: DecodedProgress = progress_of
         self._on_incomplete: MarkTerminal = on_incomplete
+        self._quarantine_incomplete: QuarantineIncomplete = quarantine_incomplete
         self._shm_name: str = shm_name
         self._staging_dir: str = staging_dir
         self._journal_dir: str = journal_dir
@@ -152,9 +161,11 @@ class SessionAuthority:
         # session_id -> the first sweep `now` at which progress_of() came back
         # None for it. A session in _specs that the aggregator does not know
         # is a wiring bug (this service has shipped that class before): it can
-        # never complete, never stall, and would leak its staging file and
-        # session-table slot forever. Instead it is logged loudly and purged
-        # INCOMPLETE once a stall_timeout has passed since it was noticed.
+        # never complete, never stall, and without this would sit in the
+        # staging tree and hold a session-table slot forever. Instead it is
+        # logged loudly and, once a stall_timeout has passed since it was
+        # noticed, purged INCOMPLETE -- which quarantines its partial with a
+        # missing-blocks report, the same as any other stall.
         self._untracked_since: dict[SessionId, float] = {}
         self._adopted: bool = False
         self._stop_event: asyncio.Event = asyncio.Event()
@@ -315,7 +326,9 @@ class SessionAuthority:
 
         The single `PurgeSession` emission point -- the sweep and the
         completion path both funnel through here, and a session already
-        purged is never re-announced.
+        purged is never re-announced. For an INCOMPLETE purge it also moves
+        the partial into quarantine with its missing-blocks report, before
+        tearing the durable footprint down.
         """
         if session_id in self._purged:
             return
@@ -324,8 +337,40 @@ class SessionAuthority:
         await self._broadcast(
             codec.encode(rx_pb2.PurgeSession(session_id=str(session_id), reason=wire_reason))
         )
+        if reason is PurgeReason.INCOMPLETE:
+            # Preserve the partial as evidence BEFORE _tear_down unlinks the
+            # journal its missing-blocks list is read from. Deliberately not
+            # best-effort: if this raises, _tear_down does not run, so the
+            # journal and shm entry survive for manual recovery rather than a
+            # quarantined partial being stranded with no record of what it
+            # holds.
+            await self._preserve_incomplete_partial(session_id)
         self._tear_down(session_id)
         logger.info("session_purged", session_id=session_id, reason=wire_reason)
+
+    async def _preserve_incomplete_partial(self, session_id: SessionId) -> None:
+        # INCOMPLETE only: move the partial to quarantine/ and drop a
+        # complete missing-blocks report beside it. A partial (up to the
+        # whole file) is evidence of what the one-way link delivered, same
+        # as a hash mismatch -- it belongs in quarantine/, not left orphaned
+        # in the staging tree. The missing list comes from the journal, not
+        # progress_of() (which caps its preview at 32), and can run a fold
+        # ahead of the aggregator's count since append precedes the fold.
+        spec = self._specs.get(session_id)
+        if spec is None:
+            logger.debug("incomplete_partial_no_spec", session_id=session_id)
+            return
+        decoded: set[BlockId] = set()
+        async for block_id in self._journal.replay(session_id):
+            decoded.add(block_id)
+        missing = missing_blocks(decoded, spec.total_blocks)
+        report = IncompleteReport(
+            session_id=session_id,
+            total_blocks=spec.total_blocks,
+            decoded_blocks=spec.total_blocks - len(missing),
+            missing_block_ids=missing,
+        )
+        self._quarantine_incomplete(spec, report)
 
     def _tear_down(self, session_id: SessionId) -> None:
         # Remove the session's durable footprint so an adopting restart does
@@ -334,6 +379,13 @@ class SessionAuthority:
         # what actually survive a crash. Best-effort: a failure here leaves a
         # stale artifact, not a wrong announcement (`_purged` still guards
         # this process; the artifact only matters on a later adopt).
+        #
+        # For an INCOMPLETE purge, _preserve_incomplete_partial() has already
+        # run: it moved the partial into quarantine/ and wrote its
+        # missing-blocks report, reading that list from the journal this
+        # method is about to unlink. That step raises rather than returns on
+        # failure, so if control reached here the report is durable and the
+        # journal below is safe to drop.
         #
         # ORDER IS LOAD-BEARING. shm first: the on-segment session table is
         # what _recover() iterates, so once it is gone nothing downstream can
@@ -441,10 +493,11 @@ class SessionAuthority:
     async def _handle_untracked(self, session_id: SessionId, spec: SessionSpec, now: float) -> None:
         # The session is in _specs but progress_of() is None -- the aggregator
         # never registered it. That is a wiring bug, not a normal state, so it
-        # is loud; and it is self-limiting so the leak is bounded: after a
-        # stall_timeout it is purged INCOMPLETE, freeing the staging file and
-        # the shm slot. The bytes on disk are worthless anyway (it can never
-        # be verified without the aggregator).
+        # is loud; and it is self-limiting: after a stall_timeout it is purged
+        # INCOMPLETE, which quarantines the partial and frees the shm slot.
+        # The bytes cannot be verified without the aggregator, but they are
+        # still evidence of what the link delivered, so they go to quarantine/
+        # like any other stall rather than being left behind or deleted.
         first_seen = self._untracked_since.get(session_id)
         if first_seen is None:
             self._untracked_since[session_id] = now
@@ -489,6 +542,27 @@ class SessionAuthority:
                     "session_spec_missing_on_recovery",
                     session_id=open_session.session_id,
                     decoded_blocks=len(decoded),
+                )
+                continue
+            if not self._file_store.staged_file_exists(spec.relpath):
+                # Sidecar and journal survived but the partial is gone -- the
+                # signature of a previous run that purged this session
+                # INCOMPLETE (moved the partial to quarantine/) and died
+                # before _tear_down cleared the sidecar/journal/shm entry.
+                # Adopting now would rebuild a session whose bytes no longer
+                # exist and re-broadcast SessionOpen for one the receivers
+                # were already sent PurgeSession for. Refuse. Stays in _known
+                # only, so a resent ManifestSeen is a no-op rather than a
+                # fresh init_session over the hole.
+                logger.error(
+                    "session_staged_file_missing_on_recovery",
+                    session_id=open_session.session_id,
+                    staged_path=str(self._file_store.staged_path(spec.relpath)),
+                    decoded_blocks=len(decoded),
+                    remedy=(
+                        "restore the partial from quarantine/ to resume it, or delete the "
+                        f"spec sidecar for {open_session.session_id} to abandon it"
+                    ),
                 )
                 continue
             self._specs[open_session.session_id] = spec

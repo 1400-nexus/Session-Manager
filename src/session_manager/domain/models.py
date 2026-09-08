@@ -62,6 +62,20 @@ class OpenSession:
 
 
 @dataclass(frozen=True)
+class IncompleteReport:
+    # Written beside a quarantined partial when the sweep gives up on a
+    # session. `missing_block_ids` is the COMPLETE list, not a preview: this
+    # file is the authoritative account of what the one-way link delivered,
+    # and the journal it is derived from is unlinked immediately after it is
+    # written. `decoded_blocks` counts only in-range blocks, so it stays
+    # consistent with `missing_block_ids` even if the journal held junk.
+    session_id: SessionId
+    total_blocks: int
+    decoded_blocks: int
+    missing_block_ids: tuple[BlockId, ...]
+
+
+@dataclass(frozen=True)
 class ReceiverCounters:
     pkts_ok: int = 0
     crc_fail: int = 0

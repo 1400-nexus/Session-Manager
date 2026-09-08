@@ -68,7 +68,8 @@ receivers (`tests/integration/stub_receiver.py`) against a throwaway config and
 exercises five scenarios:
 
 1. three receivers, all blocks → `VERIFIED`, published file hash matches source
-2. one receiver withholds blocks → stall timeout → `INCOMPLETE`, output empty
+2. one receiver withholds blocks → stall timeout → `INCOMPLETE`, output empty,
+   the partial moved to `quarantine/` with a `.incomplete.json` missing-blocks report
 3. one receiver corrupts a block's bytes → `HASH_MISMATCH`, staged file
    quarantined, output empty
 4. `kill -9` the manager mid-transfer → restart **adopts** the segment, recovers
@@ -96,7 +97,7 @@ file's own directory*, not the process's working directory.
 | `aggregation.poll_interval_s` | `NEXUS_AGGREGATION_POLL_INTERVAL_S` | `1.0` | How often completion state is recomputed. |
 | `aggregation.shm_crosscheck` | `NEXUS_AGGREGATION_SHM_CROSSCHECK` | `false` | Cross-check the UDS decoded count against the shm bitmap popcount. Off until a receiver actually writes the bitmap; the UDS `BlockDecoded` stream is authoritative on its own. |
 | `purge.sweep_interval_seconds` | `NEXUS_PURGE_SWEEP_INTERVAL_SECONDS` | `5.0` | How often the session authority sweeps open sessions for a terminal state. Must be `< stall_timeout_seconds`. |
-| `purge.stall_timeout_seconds` | `NEXUS_PURGE_STALL_TIMEOUT_SECONDS` | `60.0` | No `BlockDecoded` for this long → `INCOMPLETE` + `PurgeSession`. Placeholder pending the sender's pacing numbers. |
+| `purge.stall_timeout_seconds` | `NEXUS_PURGE_STALL_TIMEOUT_SECONDS` | `60.0` | No `BlockDecoded` for this long → `INCOMPLETE` + `PurgeSession`, and the partial is moved to `quarantine/` with a missing-blocks report. Placeholder pending the sender's pacing numbers. |
 | `receivers.count` | `NEXUS_RECEIVERS_COUNT` | `0` | Receiver child processes to supervise. `0` = supervise nothing (the binary lives in another repo). |
 | `receivers.ports` | `NEXUS_RECEIVERS_PORTS` | `9100,9101,9102` | Must have ≥ `count` entries. |
 | `receivers.binary_path` | `NEXUS_RECEIVERS_BINARY_PATH` | `./bin/nexus-receiver` | Required when `count > 0`. |

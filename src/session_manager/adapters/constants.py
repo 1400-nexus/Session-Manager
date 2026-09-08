@@ -40,3 +40,8 @@ SHM_SESSION_TABLE_BYTES = 4096
 # Python-only (unlike the shm header/session table above, nothing in the
 # C++ receivers reads this), so it carries no wire-format constraints.
 SESSION_SPEC_FILENAME_SUFFIX = ".spec.json"
+
+# Incomplete-session report: written into quarantine/ next to a partial the
+# sweep gave up on, `<relpath>` + this suffix. Records which blocks the
+# partial holds and which it lacks, since the journal is unlinked right after.
+INCOMPLETE_REPORT_FILENAME_SUFFIX = ".incomplete.json"

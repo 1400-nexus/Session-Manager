@@ -12,11 +12,12 @@ from structlog.testing import capture_logs
 from session_manager.adapters.errors import LockHeldError
 from session_manager.adapters.shm_layout import AdoptDecision
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
-from session_manager.domain.models import SessionSpec
+from session_manager.domain.models import IncompleteReport, SessionSpec
 from session_manager.domain.purge_policy import PurgeReason
 from session_manager.ipc import codec
 from session_manager.services.authority import SessionAuthority
 from session_manager.services.errors import ManifestRejected
+from session_manager.services.publisher import Publisher
 from tests.fakes.fake_clock import FakeClock
 from tests.fakes.fake_file_lock import FakeFileLock
 from tests.fakes.fake_file_store import FakeFileStore
@@ -119,13 +120,14 @@ def _rig(
     shm: FakeShm | None = None,
     journal: FakeJournal | None = None,
     spec_store: FakeSessionSpecStore | None = None,
+    store: FakeFileStore | None = None,
     sweep_interval_s: float = 0.0,
     stall_timeout_s: float = STALL_TIMEOUT,
     broadcast_gate: asyncio.Event | None = None,
 ) -> _Rig:
     lock = lock or FakeFileLock()
     shm = shm or FakeShm(probe_receiver_alive=lambda: alive)
-    store = FakeFileStore()
+    store = store or FakeFileStore()
     journal = journal or FakeJournal()
     spec_store = spec_store or FakeSessionSpecStore()
     clock = FakeClock()
@@ -162,6 +164,7 @@ def _rig(
         clock=clock,
         progress_of=progress_of,
         on_incomplete=incomplete.append,
+        quarantine_incomplete=Publisher(store).quarantine_incomplete,
         shm_name=SHM_NAME,
         staging_dir="/var/nexus/staging",
         journal_dir="/var/nexus/journal",
@@ -261,7 +264,12 @@ async def test_adopting_a_live_segment_leaves_its_bytes_intact_and_recovers_sess
     alive[0] = True
     recovering_journal = FakeJournal()
     recovering_journal.preload(SessionId("s-1"), [BlockId(0), BlockId(2)])
-    second = _rig(shm=shared_shm, journal=recovering_journal, spec_store=shared_spec_store)
+    second = _rig(
+        shm=shared_shm,
+        journal=recovering_journal,
+        spec_store=shared_spec_store,
+        store=first.store,  # the staged file first allocated must still be visible
+    )
 
     await second.authority.start()
 
@@ -324,6 +332,49 @@ async def test_a_session_with_a_lost_spec_sidecar_is_known_but_untracked() -> No
     await second.authority.handle_manifest_seen(R2, _manifest_seen("s-1"))
     assert second.broadcasts == []
     assert second.sends == []
+
+
+async def test_recover_refuses_a_session_whose_staged_file_is_gone() -> None:
+    # sidecar + journal + shm entry all present, but the staged partial is not
+    # -- the signature of a prior run that purged this session INCOMPLETE
+    # (moving the partial to quarantine/) then died before _tear_down.
+    shared_shm = FakeShm(probe_receiver_alive=lambda: alive[0])
+    shared_spec_store = FakeSessionSpecStore()
+    shared_store = FakeFileStore()
+    shared_journal = FakeJournal()
+    alive = [False]
+
+    first = _rig(
+        shm=shared_shm, spec_store=shared_spec_store, store=shared_store, journal=shared_journal
+    )
+    await first.authority.start()
+    await first.authority.handle_manifest_seen(R1, _manifest_seen("s-1"))
+    shared_journal.preload(SessionId("s-1"), [BlockId(0), BlockId(2)])
+    shared_store.staged.discard("sub/dir/output.bin")  # the partial is gone
+
+    alive[0] = True
+    second = _rig(
+        shm=shared_shm, spec_store=shared_spec_store, store=shared_store, journal=shared_journal
+    )
+    with capture_logs() as logs:
+        await second.authority.start()
+
+    missing = [e for e in logs if e["event"] == "session_staged_file_missing_on_recovery"]
+    assert missing
+    assert missing[0]["staged_path"] == str(shared_store.staged_path("sub/dir/output.bin"))
+    assert "quarantine/" in missing[0]["remedy"] and "sidecar" in missing[0]["remedy"]
+
+    # not adopted: invisible to progress tracking and to the sweep
+    assert second.opened == []
+    assert second.authority.was_recovered(SessionId("s-1")) is False
+    assert second.broadcasts == []
+    await second.authority.send_open_sessions_to(R2)
+    assert second.sends == []  # no SessionOpen for a session with no bytes
+
+    # sidecar, journal and shm entry left in place for manual recovery
+    assert shared_spec_store.load(SessionId("s-1")) is not None
+    assert [b async for b in shared_journal.replay(SessionId("s-1"))] == [BlockId(0), BlockId(2)]
+    assert [s.session_id for s in shared_shm.open_sessions()] == [SessionId("s-1")]
 
 
 async def test_a_fallocate_failure_leaves_no_session_in_shm_and_no_broadcast() -> None:
@@ -604,6 +655,12 @@ async def test_an_untracked_session_is_logged_loudly_then_purged_after_the_timeo
     assert [codec.decode(p)[0] for p in rig.broadcasts] == ["purge_session"]
     assert rig.authority.is_purged(SessionId("s-1")) is True
     assert rig.shm.open_sessions() == ()  # footprint torn down
+    # Even here the partial is preserved: nothing was journaled (the
+    # aggregator never registered it), so the report is "everything missing".
+    assert rig.store.quarantined == ["sub/dir/output.s-1.bin"]
+    report = rig.store.incomplete_reports["sub/dir/output.s-1.bin"]
+    assert report.decoded_blocks == 0
+    assert report.missing_block_ids == tuple(BlockId(i) for i in range(TOTAL_BLOCKS))
 
 
 async def test_an_untracked_session_that_gets_registered_before_the_timeout_is_left_alone() -> None:
@@ -662,6 +719,94 @@ async def test_the_sweep_keys_its_stall_clock_off_progress_of_not_wall_time() ->
     rig.set_progress("s-1", decoded=2, last_block_at=9_000.0, missing=(2,))  # stale
     await rig.authority._sweep_once()
     assert [codec.decode(p)[0] for p in rig.broadcasts] == ["purge_session"]
+
+
+async def test_a_swept_session_quarantines_its_partial_with_the_journal_missing_list() -> None:
+    rig = _rig(stall_timeout_s=30.0)
+    await rig.authority.start()
+    await rig.authority.handle_manifest_seen(R1, _manifest_seen("s-1", file_size=BIG_FILE_SIZE))
+    # 5 of 12 blocks landed, with a non-contiguous gap -- this is the record
+    # the sidecar must reproduce exactly, and it comes from the journal, not
+    # progress_of()'s 32-capped preview.
+    got = [BlockId(0), BlockId(2), BlockId(5), BlockId(6), BlockId(9)]
+    rig.journal.preload(SessionId("s-1"), got)
+    rig.set_progress("s-1", decoded=len(got), last_block_at=10.0, missing=(1, 3))
+    rig.broadcasts.clear()
+
+    rig.clock.advance(45.0)  # 35s past the last block
+    await rig.authority._sweep_once()
+
+    assert rig.store.quarantined == ["sub/dir/output.s-1.bin"]  # session id before the extension
+    assert "sub/dir/output.bin" not in rig.store.staged
+    report = rig.store.incomplete_reports["sub/dir/output.s-1.bin"]
+    assert report == IncompleteReport(
+        session_id=SessionId("s-1"),
+        total_blocks=12,
+        decoded_blocks=5,
+        missing_block_ids=(
+            BlockId(1),
+            BlockId(3),
+            BlockId(4),
+            BlockId(7),
+            BlockId(8),
+            BlockId(10),
+            BlockId(11),
+        ),
+    )
+    assert rig.journal.purged == [SessionId("s-1")]  # journal unlinked only after the report
+
+
+async def test_the_incomplete_report_is_written_before_tear_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # If the process dies (here: _tear_down raises) after the report is
+    # written but before the journal is unlinked, the quarantined partial is
+    # still interpretable and the journal survives for manual recovery.
+    rig = _rig(stall_timeout_s=30.0)
+    await rig.authority.start()
+    await rig.authority.handle_manifest_seen(R1, _manifest_seen("s-1", file_size=BIG_FILE_SIZE))
+    rig.journal.preload(SessionId("s-1"), [BlockId(0), BlockId(1)])
+    rig.broadcasts.clear()
+
+    def _boom(_session_id: SessionId) -> None:
+        raise RuntimeError("crashed mid-teardown")
+
+    monkeypatch.setattr(rig.authority, "_tear_down", _boom)
+
+    with pytest.raises(RuntimeError, match="crashed mid-teardown"):
+        await rig.authority.purge(SessionId("s-1"), PurgeReason.INCOMPLETE)
+
+    assert "sub/dir/output.s-1.bin" in rig.store.incomplete_reports  # step 2 completed
+    assert rig.store.incomplete_reports["sub/dir/output.s-1.bin"].decoded_blocks == 2
+    assert rig.journal.purged == []  # step 3 never ran -- journal still on disk
+
+
+async def test_two_incomplete_transfers_of_one_file_get_separate_partials_and_reports() -> None:
+    # A file dropped, purged INCOMPLETE, then re-dropped and purged again in one
+    # manager run: each has its own session id, so neither partial nor report
+    # clobbers the other's.
+    rig = _rig(stall_timeout_s=30.0)
+    await rig.authority.start()
+    same_file = "reports/quarterly.bin"
+
+    for session_id, decoded in (
+        ("transfer-1", [BlockId(0)]),
+        ("transfer-2", [BlockId(0), BlockId(1)]),
+    ):
+        await rig.authority.handle_manifest_seen(
+            R1, _manifest_seen(session_id, filepath=same_file, file_size=BIG_FILE_SIZE)
+        )
+        rig.journal.preload(SessionId(session_id), decoded)
+        rig.set_progress(session_id, decoded=len(decoded), last_block_at=0.0)
+        rig.clock.advance(31.0)
+        await rig.authority._sweep_once()
+
+    assert sorted(rig.store.quarantined) == [
+        "reports/quarterly.transfer-1.bin",
+        "reports/quarterly.transfer-2.bin",
+    ]
+    assert rig.store.incomplete_reports["reports/quarterly.transfer-1.bin"].decoded_blocks == 1
+    assert rig.store.incomplete_reports["reports/quarterly.transfer-2.bin"].decoded_blocks == 2
 
 
 # --- stopping the sweep loop --------------------------------------------

@@ -293,6 +293,24 @@ milestone_2() {
         echo "FAIL: output directory not empty after milestone 2"
         ok=1
     fi
+    # The partial is evidence, not scratch: it moves to quarantine/ with the
+    # session id before the extension (stub-m2.m2.bin) and a report of exactly
+    # which blocks it lacks (block 0, withheld above).
+    if [ ! -f "$STAGING_DIR/quarantine/stub-m2.m2.bin" ]; then
+        echo "FAIL: incomplete partial was not quarantined for milestone 2"
+        ok=1
+    fi
+    if ! python3 - "$STAGING_DIR/quarantine/stub-m2.m2.bin.incomplete.json" << 'PYEOF'
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["session_id"] == "m2", report
+assert report["missing_block_ids"] == [0], report
+assert report["decoded_blocks"] == report["total_blocks"] - 1, report
+PYEOF
+    then
+        echo "FAIL: milestone 2 incomplete report missing or wrong"
+        ok=1
+    fi
 
     stop_all_stubs
     set -e

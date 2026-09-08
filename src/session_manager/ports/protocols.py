@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Protocol, TypeVar
 
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
-from session_manager.domain.models import OpenSession, SessionSpec
+from session_manager.domain.models import IncompleteReport, OpenSession, SessionSpec
 
 ProcessHandle = TypeVar("ProcessHandle")
 
@@ -123,15 +123,41 @@ class FileStore(Protocol):
     can observe half-written. `allocate` reserves space up front (`fallocate`)
     so a transfer fails before it starts rather than midway. `quarantine`
     keeps the staged bytes on a hash mismatch -- they are the only evidence
-    for diagnosing what corrupted them, so nothing deletes them. `staged_path`
-    is a pure path computation and touches no filesystem.
+    for diagnosing what corrupted them, so nothing deletes them.
+    `quarantine_incomplete` does the same for a partial the sweep gave up on
+    and additionally records what that partial holds. `staged_path` is a pure
+    path computation and touches no filesystem.
     """
 
     def allocate(self, relpath: str, size: int) -> Path: ...
 
     def publish(self, relpath: str) -> Path: ...
 
+    def staged_file_exists(self, relpath: str) -> bool:
+        """Whether the staged file for `relpath` is currently on disk.
+
+        `SessionAuthority._recover` asks this before adopting a session it
+        rebuilt from the sidecar: if a previous run quarantined the partial
+        (INCOMPLETE) but died before clearing the sidecar, adopting again
+        would rebuild a session whose bytes are gone.
+        """
+        ...
+
     def quarantine(self, relpath: str) -> Path: ...
+
+    def quarantine_incomplete(self, relpath: str, report: IncompleteReport) -> Path:
+        """Quarantine a partial the sweep declared INCOMPLETE, with its report.
+
+        Moves the staged bytes into `quarantine/` exactly as `quarantine`
+        does, then writes `quarantine/<relpath>.incomplete.json` beside them
+        -- `{session_id, total_blocks, decoded_blocks, missing_block_ids}`,
+        the missing list complete rather than a preview. The report is
+        written atomically (temp file + rename) and is durable on return, so
+        the caller may then unlink the journal it was derived from: a
+        quarantined partial with no report is uninterpretable. Returns the
+        partial's new path.
+        """
+        ...
 
     def staged_path(self, relpath: str) -> Path: ...
 

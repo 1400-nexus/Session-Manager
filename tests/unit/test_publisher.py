@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from session_manager.domain.ids import SessionId
-from session_manager.domain.models import SessionSpec
+from session_manager.domain.ids import BlockId, SessionId
+from session_manager.domain.models import IncompleteReport, SessionSpec
 from session_manager.services.errors import PublishRejected
 from session_manager.services.publisher import Publisher
 from tests.fakes.fake_file_store import FakeFileStore
@@ -45,6 +45,39 @@ def test_quarantine_delegates_and_never_touches_published() -> None:
     assert store.quarantined == ["sub/file.bin"]
     assert store.published == []
     assert "sub/file.bin" not in store.staged
+
+
+def _report() -> IncompleteReport:
+    return IncompleteReport(
+        session_id=SessionId("s-1"),
+        total_blocks=3,
+        decoded_blocks=1,
+        missing_block_ids=(BlockId(1), BlockId(2)),
+    )
+
+
+def test_quarantine_incomplete_moves_the_partial_and_passes_the_report_through() -> None:
+    store = FakeFileStore(root=Path("/store"))
+    store.staged.add("sub/file.bin")
+    publisher = Publisher(store)
+
+    quarantined_path = publisher.quarantine_incomplete(_spec(), _report())
+
+    assert quarantined_path == Path("/store/quarantine/sub/file.s-1.bin")
+    assert store.quarantined == ["sub/file.s-1.bin"]
+    assert store.published == []
+    assert store.incomplete_reports["sub/file.s-1.bin"] == _report()
+
+
+def test_quarantine_incomplete_rejects_an_unsafe_relpath_before_any_write() -> None:
+    store = FakeFileStore()
+    publisher = Publisher(store)
+
+    with pytest.raises(PublishRejected):
+        publisher.quarantine_incomplete(_spec(relpath="../escape"), _report())
+
+    assert store.quarantined == []
+    assert store.incomplete_reports == {}
 
 
 @pytest.mark.parametrize(

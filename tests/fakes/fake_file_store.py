@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from session_manager.adapters.quarantine_paths import quarantine_name
+from session_manager.domain.models import IncompleteReport
+
 
 class FakeFileStore:
     """In-memory FileStore: records calls, returns plausible paths.
@@ -17,7 +20,11 @@ class FakeFileStore:
         self._root: Path = root
         self.allocated: list[tuple[str, int]] = []
         self.published: list[str] = []
+        # quarantine() records the source relpath; quarantine_incomplete()
+        # records the disambiguated name it actually moved the partial to,
+        # keyed the same way in incomplete_reports.
         self.quarantined: list[str] = []
+        self.incomplete_reports: dict[str, IncompleteReport] = {}
         self.staged: set[str] = set()
         self._pending_allocate_error: Exception | None = None
         self._pending_publish_error: Exception | None = None
@@ -58,6 +65,20 @@ class FakeFileStore:
         self.staged.discard(relpath)
         self.quarantined.append(relpath)
         return self._root / "quarantine" / relpath
+
+    def quarantine_incomplete(self, relpath: str, report: IncompleteReport) -> Path:
+        if self._pending_quarantine_error is not None:
+            error = self._pending_quarantine_error
+            self._pending_quarantine_error = None
+            raise error
+        self.staged.discard(relpath)
+        name = quarantine_name(relpath, report.session_id)
+        self.quarantined.append(name)
+        self.incomplete_reports[name] = report
+        return self._root / "quarantine" / name
+
+    def staged_file_exists(self, relpath: str) -> bool:
+        return relpath in self.staged
 
     def staged_path(self, relpath: str) -> Path:
         return self._root / "staging" / relpath

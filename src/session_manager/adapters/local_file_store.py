@@ -1,7 +1,40 @@
+import json
 import os
 from pathlib import Path
 
-from session_manager.adapters.constants import QUARANTINE_SUBDIR_NAME, STAGED_FILE_MODE
+from session_manager.adapters.constants import (
+    INCOMPLETE_REPORT_FILENAME_SUFFIX,
+    QUARANTINE_SUBDIR_NAME,
+    STAGED_FILE_MODE,
+)
+from session_manager.adapters.quarantine_paths import quarantine_name
+from session_manager.domain.models import IncompleteReport
+
+
+def _write_json_atomically(path: Path, data: dict[str, object]) -> None:
+    # Temp file in the same directory (so os.replace is a same-filesystem
+    # rename, which is atomic), fsync'd, then renamed over the target: a
+    # crash mid-write leaves either the old file or the complete new one,
+    # never a truncated JSON the reader chokes on. JsonSessionSpecStore.save
+    # is a bare write_text and should adopt this too.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    payload = json.dumps(data).encode()
+    file_descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, STAGED_FILE_MODE)
+    with os.fdopen(file_descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
+
+
+def _incomplete_report_to_json(report: IncompleteReport) -> dict[str, object]:
+    return {
+        "session_id": str(report.session_id),
+        "total_blocks": report.total_blocks,
+        "decoded_blocks": report.decoded_blocks,
+        "missing_block_ids": [int(block_id) for block_id in report.missing_block_ids],
+    }
 
 
 class LocalFileStore:
@@ -43,11 +76,28 @@ class LocalFileStore:
         os.replace(staged, output)
         return output
 
+    def staged_file_exists(self, relpath: str) -> bool:
+        return self.staged_path(relpath).is_file()
+
     def quarantine(self, relpath: str) -> Path:
         staged = self.staged_path(relpath)
         quarantined = self._quarantine_dir / relpath
         quarantined.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staged, quarantined)
+        return quarantined
+
+    def quarantine_incomplete(self, relpath: str, report: IncompleteReport) -> Path:
+        staged = self.staged_path(relpath)
+        quarantined = self._quarantine_dir / quarantine_name(relpath, report.session_id)
+        quarantined.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, quarantined)
+        # Report name derived from the move's target, never recomputed from
+        # relpath -- two INCOMPLETE transfers of one filename must not share
+        # (or clobber) a report.
+        report_path = quarantined.with_name(
+            f"{quarantined.name}{INCOMPLETE_REPORT_FILENAME_SUFFIX}"
+        )
+        _write_json_atomically(report_path, _incomplete_report_to_json(report))
         return quarantined
 
     def staged_path(self, relpath: str) -> Path:

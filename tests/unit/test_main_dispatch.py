@@ -30,6 +30,7 @@ from session_manager.main import (
 )
 from session_manager.services.aggregator import ProgressAggregator
 from session_manager.services.authority import SessionAuthority
+from session_manager.services.publisher import Publisher
 from session_manager.services.receiver_registry import ReceiverRegistry
 from tests.fakes.fake_clock import FakeClock
 from tests.fakes.fake_file_lock import FakeFileLock
@@ -86,10 +87,11 @@ def _context(
     async def send_to_receiver(receiver_id: ReceiverId, payload: bytes) -> None:
         sends.append((receiver_id, payload))
 
+    file_store = FakeFileStore()
     authority = SessionAuthority(
         file_lock=FakeFileLock(),
         shm=shm,
-        file_store=FakeFileStore(),
+        file_store=file_store,
         journal=journal,
         spec_store=FakeSessionSpecStore(),
         broadcast=lambda payload: asyncio.sleep(0),
@@ -98,6 +100,7 @@ def _context(
         clock=clock,
         progress_of=aggregator.progress_of,
         on_incomplete=aggregator.mark_incomplete,
+        quarantine_incomplete=Publisher(file_store).quarantine_incomplete,
         shm_name="seg",
         staging_dir="/staging",
         journal_dir="/journal",

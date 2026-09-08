@@ -321,6 +321,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         clock=clock,
         progress_of=aggregator.progress_of,
         on_incomplete=aggregator.mark_incomplete,
+        quarantine_incomplete=publisher.quarantine_incomplete,
         shm_name=config.shm.name,
         staging_dir=str(config.paths.staging_dir),
         journal_dir=str(config.paths.journal_dir),
