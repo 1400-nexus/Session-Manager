@@ -845,8 +845,10 @@ quiet either way — keep it if he writes bits, delete it if not.
 the shm/proto changes it unblocks: a single `receiver_region_offset` /
 `total_size` boundary in the header (killing the negotiated slot layout,
 `SessionOpen.7`/`.8`, and C's bump allocator), `SessionOpen.file_size` field 9,
-and `PurgeSession.reason` as an enum. None landed — waiting on B's four
-confirmations at the end of that doc.
+and `PurgeSession.reason` as an enum. None landed.
+[`CROSS_TEAM_PENDING.md`](CROSS_TEAM_PENDING.md) is the live index — every
+confirmation C is waiting on from A and B, and which of the four queued
+changes it unblocks.
 
 **Defined but unsent:** `UpdateRate` and `Abort` on the TX side. Both are in the
 schema and neither is dispatched yet.
