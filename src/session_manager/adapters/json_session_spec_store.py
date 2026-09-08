@@ -4,6 +4,7 @@ from typing import Any
 
 import structlog
 
+from session_manager.adapters.atomic_write import write_json_atomically
 from session_manager.adapters.constants import SESSION_SPEC_FILENAME_SUFFIX
 from session_manager.domain.ids import SessionId
 from session_manager.domain.models import SessionSpec
@@ -12,7 +13,7 @@ from session_manager.domain.paths import is_unsafe_filename_component
 logger = structlog.get_logger(__name__)
 
 
-def _to_json(spec: SessionSpec) -> dict[str, Any]:
+def _to_json(spec: SessionSpec) -> dict[str, object]:
     return {
         "session_id": str(spec.session_id),
         "relpath": spec.relpath,
@@ -51,9 +52,10 @@ class JsonSessionSpecStore:
         self._spec_dir: Path = spec_dir
 
     def save(self, spec: SessionSpec) -> None:
-        path = self._path_for(spec.session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_to_json(spec)))
+        # Atomic: milestone 4's whole recovery path reads this file, and it
+        # simulates a kill -9 -- a bare write interrupted mid-flush would
+        # leave a truncated sidecar and an unrecoverable session.
+        write_json_atomically(self._path_for(spec.session_id), _to_json(spec))
 
     def load(self, session_id: SessionId) -> SessionSpec | None:
         path = self._path_for(session_id)

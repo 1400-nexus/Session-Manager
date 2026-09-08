@@ -1,7 +1,7 @@
-import json
 import os
 from pathlib import Path
 
+from session_manager.adapters.atomic_write import write_json_atomically
 from session_manager.adapters.constants import (
     INCOMPLETE_REPORT_FILENAME_SUFFIX,
     QUARANTINE_SUBDIR_NAME,
@@ -9,23 +9,6 @@ from session_manager.adapters.constants import (
 )
 from session_manager.adapters.quarantine_paths import quarantine_name
 from session_manager.domain.models import IncompleteReport
-
-
-def _write_json_atomically(path: Path, data: dict[str, object]) -> None:
-    # Temp file in the same directory (so os.replace is a same-filesystem
-    # rename, which is atomic), fsync'd, then renamed over the target: a
-    # crash mid-write leaves either the old file or the complete new one,
-    # never a truncated JSON the reader chokes on. JsonSessionSpecStore.save
-    # is a bare write_text and should adopt this too.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    payload = json.dumps(data).encode()
-    file_descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, STAGED_FILE_MODE)
-    with os.fdopen(file_descriptor, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp_path, path)
 
 
 def _incomplete_report_to_json(report: IncompleteReport) -> dict[str, object]:
@@ -97,7 +80,7 @@ class LocalFileStore:
         report_path = quarantined.with_name(
             f"{quarantined.name}{INCOMPLETE_REPORT_FILENAME_SUFFIX}"
         )
-        _write_json_atomically(report_path, _incomplete_report_to_json(report))
+        write_json_atomically(report_path, _incomplete_report_to_json(report))
         return quarantined
 
     def staged_path(self, relpath: str) -> Path:

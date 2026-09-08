@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,38 @@ def test_save_writes_next_to_the_journal_directory(tmp_path: Path) -> None:
     store.save(_spec())
 
     assert (journal_dir / "s-1.spec.json").is_file()
+    assert store.load(SESSION) == _spec()
+    assert [p.name for p in journal_dir.iterdir()] == ["s-1.spec.json"]  # no .tmp residue
+
+
+def test_a_save_that_fails_at_the_rename_leaves_the_previous_sidecar_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal_dir = tmp_path / "journal"
+    store = JsonSessionSpecStore(journal_dir)
+    store.save(_spec())
+    original = _spec()
+
+    newer = SessionSpec(
+        session_id=SESSION,
+        relpath="sub/dir/output.bin",
+        file_size=2_000_000,
+        file_hash=b"\xcd" * 32,
+        k=200,
+        n=255,
+        symbol_bytes=1400,
+        total_blocks=6,
+    )
+    monkeypatch.setattr(os, "replace", _raise_oserror)
+    with pytest.raises(OSError):
+        store.save(newer)
+
+    assert store.load(SESSION) == original  # untouched, not truncated
+    assert [p.name for p in journal_dir.iterdir()] == ["s-1.spec.json"]  # temp cleaned up
+
+
+def _raise_oserror(*_args: object, **_kwargs: object) -> None:
+    raise OSError("rename interrupted")
 
 
 def test_a_corrupt_sidecar_loads_as_none_and_logs(tmp_path: Path) -> None:
