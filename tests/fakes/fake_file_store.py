@@ -15,17 +15,21 @@ class FakeFileStore:
     `fail_next_allocate` injects a `fallocate` failure (ENOSPC and friends);
     a store that always succeeds would hide the authority's ordering -- shm is
     only initialised after the staging file is reserved.
+
+    `quarantined` and `incomplete_reports` record what the store was *handed*
+    -- the (relpath, session_id) of each move, and the report keyed by its
+    session id -- not a name derived through `quarantine_name`. The returned
+    `Path` is still `quarantine_name`-shaped so callers and log lines get a
+    plausible one, but tests assert on the recorded inputs. `quarantine_name`
+    itself is pinned only by `tests/unit/test_quarantine_paths.py`.
     """
 
     def __init__(self, root: Path = Path("/fake-store")) -> None:
         self._root: Path = root
         self.allocated: list[tuple[str, int]] = []
         self.published: list[str] = []
-        # Both quarantine paths record the disambiguated name they moved the
-        # partial to (<stem>.<session_id><ext>); incomplete_reports is keyed
-        # the same way.
-        self.quarantined: list[str] = []
-        self.incomplete_reports: dict[str, IncompleteReport] = {}
+        self.quarantined: list[tuple[str, SessionId]] = []
+        self.incomplete_reports: dict[SessionId, IncompleteReport] = {}
         self.staged: set[str] = set()
         self._pending_allocate_error: Exception | None = None
         self._pending_publish_error: Exception | None = None
@@ -64,20 +68,13 @@ class FakeFileStore:
             self._pending_quarantine_error = None
             raise error
         self.staged.discard(relpath)
-        quarantined = self._root / "quarantine" / quarantine_name(relpath, session_id)
-        self.quarantined.append(self._quarantine_rel(quarantined))
-        return quarantined
+        self.quarantined.append((relpath, session_id))
+        return self._root / "quarantine" / quarantine_name(relpath, session_id)
 
     def quarantine_incomplete(self, relpath: str, report: IncompleteReport) -> Path:
-        # Everything here is keyed off quarantine()'s return, never a second
-        # quarantine_name() call -- deriving the report path from the move's
-        # result rather than recomputing it from relpath was the actual bug.
         quarantined = self.quarantine(relpath, report.session_id)
-        self.incomplete_reports[self._quarantine_rel(quarantined)] = report
+        self.incomplete_reports[report.session_id] = report
         return quarantined
-
-    def _quarantine_rel(self, quarantined: Path) -> str:
-        return quarantined.relative_to(self._root / "quarantine").as_posix()
 
     def staged_file_exists(self, relpath: str) -> bool:
         return relpath in self.staged

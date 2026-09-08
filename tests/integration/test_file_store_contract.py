@@ -6,7 +6,6 @@ import pytest
 
 from session_manager.adapters.constants import INCOMPLETE_REPORT_FILENAME_SUFFIX
 from session_manager.adapters.local_file_store import LocalFileStore
-from session_manager.adapters.quarantine_paths import quarantine_name
 from session_manager.domain.ids import BlockId, SessionId
 from session_manager.domain.models import IncompleteReport
 from session_manager.ports.protocols import FileStore
@@ -20,9 +19,12 @@ REPORT = IncompleteReport(
     decoded_blocks=3,
     missing_block_ids=(BlockId(1), BlockId(4)),
 )
-INCOMPLETE_NAME = quarantine_name(RELPATH, REPORT.session_id)
 MISMATCH_SESSION = SessionId("m1sm4tch")
-MISMATCH_NAME = quarantine_name(RELPATH, MISMATCH_SESSION)
+
+# The harness locates quarantined files by counting them and by reading each
+# report's own `session_id` field -- never by reconstructing the on-disk name
+# with `quarantine_name`. That keeps this suite an independent check of the
+# adapters' behaviour rather than a mirror of the naming helper.
 
 
 class Harness(Protocol):
@@ -32,11 +34,18 @@ class Harness(Protocol):
 
     def is_published(self, relpath: str) -> bool: ...
 
-    # `name` here is the on-disk quarantine name: the relpath for quarantine(),
-    # the session-id-disambiguated name for quarantine_incomplete().
-    def is_quarantined(self, name: str) -> bool: ...
+    def quarantined_partial_count(self) -> int: ...
 
-    def incomplete_report(self, name: str) -> dict[str, object] | None: ...
+    def incomplete_report_for(self, session_id: SessionId) -> dict[str, object] | None: ...
+
+
+def _report_to_json(report: IncompleteReport) -> dict[str, object]:
+    return {
+        "session_id": str(report.session_id),
+        "total_blocks": report.total_blocks,
+        "decoded_blocks": report.decoded_blocks,
+        "missing_block_ids": [int(block_id) for block_id in report.missing_block_ids],
+    }
 
 
 class FakeHarness:
@@ -52,25 +61,19 @@ class FakeHarness:
     def is_published(self, relpath: str) -> bool:
         return relpath in self._store.published
 
-    def is_quarantined(self, name: str) -> bool:
-        return name in self._store.quarantined
+    def quarantined_partial_count(self) -> int:
+        return len(self._store.quarantined)
 
-    def incomplete_report(self, name: str) -> dict[str, object] | None:
-        report = self._store.incomplete_reports.get(name)
-        if report is None:
-            return None
-        return {
-            "session_id": str(report.session_id),
-            "total_blocks": report.total_blocks,
-            "decoded_blocks": report.decoded_blocks,
-            "missing_block_ids": [int(block_id) for block_id in report.missing_block_ids],
-        }
+    def incomplete_report_for(self, session_id: SessionId) -> dict[str, object] | None:
+        report = self._store.incomplete_reports.get(session_id)
+        return None if report is None else _report_to_json(report)
 
 
 class LocalHarness:
     def __init__(self, tmp_path: Path) -> None:
         self._staging_dir = tmp_path / "staging"
         self._output_dir = tmp_path / "output"
+        self._quarantine_dir = self._staging_dir / "quarantine"
         self._store = LocalFileStore(self._staging_dir, self._output_dir)
 
     def make(self) -> FileStore:
@@ -82,15 +85,23 @@ class LocalHarness:
     def is_published(self, relpath: str) -> bool:
         return (self._output_dir / relpath).is_file()
 
-    def is_quarantined(self, name: str) -> bool:
-        return (self._staging_dir / "quarantine" / name).is_file()
+    def quarantined_partial_count(self) -> int:
+        if not self._quarantine_dir.is_dir():
+            return 0
+        return sum(
+            1
+            for path in self._quarantine_dir.rglob("*")
+            if path.is_file() and not path.name.endswith(INCOMPLETE_REPORT_FILENAME_SUFFIX)
+        )
 
-    def incomplete_report(self, name: str) -> dict[str, object] | None:
-        path = self._staging_dir / "quarantine" / f"{name}{INCOMPLETE_REPORT_FILENAME_SUFFIX}"
-        if not path.is_file():
+    def incomplete_report_for(self, session_id: SessionId) -> dict[str, object] | None:
+        if not self._quarantine_dir.is_dir():
             return None
-        parsed: dict[str, object] = json.loads(path.read_text())
-        return parsed
+        for path in self._quarantine_dir.rglob(f"*{INCOMPLETE_REPORT_FILENAME_SUFFIX}"):
+            parsed: dict[str, object] = json.loads(path.read_text())
+            if parsed.get("session_id") == str(session_id):
+                return parsed
+        return None
 
 
 @pytest.fixture(params=["fake", "local"])
@@ -124,7 +135,7 @@ def test_publish_moves_staged_to_published(harness: Harness) -> None:
 
     assert harness.is_published(RELPATH)
     assert not harness.is_staged(RELPATH)
-    assert not harness.is_quarantined(MISMATCH_NAME)
+    assert harness.quarantined_partial_count() == 0
 
 
 def test_quarantine_moves_staged_to_quarantined_never_to_published(harness: Harness) -> None:
@@ -133,7 +144,7 @@ def test_quarantine_moves_staged_to_quarantined_never_to_published(harness: Harn
 
     store.quarantine(RELPATH, MISMATCH_SESSION)
 
-    assert harness.is_quarantined(MISMATCH_NAME)  # session id before the extension
+    assert harness.quarantined_partial_count() == 1
     assert not harness.is_staged(RELPATH)
     assert not harness.is_published(RELPATH)
 
@@ -155,10 +166,10 @@ def test_quarantine_incomplete_moves_the_partial_and_records_its_report(harness:
 
     store.quarantine_incomplete(RELPATH, REPORT)
 
-    assert harness.is_quarantined(INCOMPLETE_NAME)  # session id before the extension
+    assert harness.quarantined_partial_count() == 1
     assert not harness.is_staged(RELPATH)
     assert not harness.is_published(RELPATH)
-    assert harness.incomplete_report(INCOMPLETE_NAME) == {
+    assert harness.incomplete_report_for(REPORT.session_id) == {
         "session_id": "s-1",
         "total_blocks": 5,
         "decoded_blocks": 3,
@@ -176,12 +187,8 @@ def test_two_incomplete_transfers_of_one_relpath_do_not_collide(harness: Harness
     store.allocate(RELPATH, ALLOCATE_SIZE)
     store.quarantine_incomplete(RELPATH, report_b)
 
-    name_a = quarantine_name(RELPATH, report_a.session_id)
-    name_b = quarantine_name(RELPATH, report_b.session_id)
-    assert name_a != name_b
-    assert harness.is_quarantined(name_a)
-    assert harness.is_quarantined(name_b)
-    report_a_json = harness.incomplete_report(name_a)
-    report_b_json = harness.incomplete_report(name_b)
+    assert harness.quarantined_partial_count() == 2
+    report_a_json = harness.incomplete_report_for(report_a.session_id)
+    report_b_json = harness.incomplete_report_for(report_b.session_id)
     assert report_a_json is not None and report_a_json["missing_block_ids"] == [4]
     assert report_b_json is not None and report_b_json["missing_block_ids"] == [1, 2, 3]

@@ -41,10 +41,12 @@ def test_quarantine_delegates_and_never_touches_published() -> None:
 
     quarantined_path = publisher.quarantine(_spec())
 
-    assert quarantined_path == Path("/store/quarantine/sub/file.s-1.bin")
-    assert store.quarantined == ["sub/file.s-1.bin"]
+    # Assert on what the store was handed, not on the quarantine_name-derived
+    # return (that naming is pinned by test_quarantine_paths.py alone).
+    assert store.quarantined == [("sub/file.bin", SessionId("s-1"))]
     assert store.published == []
     assert "sub/file.bin" not in store.staged
+    assert "quarantine" in quarantined_path.parts
 
 
 def _report() -> IncompleteReport:
@@ -63,10 +65,10 @@ def test_quarantine_incomplete_moves_the_partial_and_passes_the_report_through()
 
     quarantined_path = publisher.quarantine_incomplete(_spec(), _report())
 
-    assert quarantined_path == Path("/store/quarantine/sub/file.s-1.bin")
-    assert store.quarantined == ["sub/file.s-1.bin"]
+    assert store.quarantined == [("sub/file.bin", SessionId("s-1"))]
     assert store.published == []
-    assert store.incomplete_reports["sub/file.s-1.bin"] == _report()
+    assert store.incomplete_reports[SessionId("s-1")] == _report()
+    assert "quarantine" in quarantined_path.parts
 
 
 def test_quarantine_incomplete_rejects_an_unsafe_relpath_before_any_write() -> None:

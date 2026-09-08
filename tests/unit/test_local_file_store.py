@@ -142,6 +142,9 @@ def test_quarantine_incomplete_keeps_the_partial_byte_identical_and_writes_the_r
 
     quarantined = store.quarantine_incomplete("sub/part.bin", report)
 
+    # Literal, not quarantine_name(...): with test_quarantine_paths.py this is
+    # the only real coverage of the naming -- the fake and the contract
+    # harness no longer form expectations from the helper. Keep it spelled out.
     assert quarantined == tmp_path / "staging" / "quarantine" / "sub" / "part.abc123.bin"
     assert quarantined.read_bytes() == partial_bytes
     assert not staged.exists()
@@ -199,6 +202,8 @@ def test_two_incomplete_transfers_of_one_relpath_keep_both_partials_and_reports(
         ),
     )
 
+    # Literal names, not quarantine_name(...): see test_quarantine_paths.py --
+    # this is the independent pin on the naming and must stay spelled out.
     quarantine_dir = tmp_path / "staging" / "quarantine"
     assert (quarantine_dir / "report.aaaa1111.bin").read_bytes() == b"aaa"
     assert (quarantine_dir / "report.bbbb2222.bin").read_bytes() == b"bbb"
@@ -213,7 +218,9 @@ def test_quarantine_names_use_a_real_session_token_not_just_the_milestone_form(
 ) -> None:
     # The milestone harness uses "m3" as the session id; production is
     # secrets.token_hex(8). Exercise the real shape: 16 hex chars spliced in
-    # before the extension, report sitting right next to the partial.
+    # before the extension, report sitting right next to the partial. Pattern
+    # spelled out, not quarantine_name(...) -- see test_quarantine_paths.py;
+    # this and the two collision tests above are the naming's only real pin.
     store = _store(tmp_path)
     session_token = SessionId(secrets.token_hex(8))
 

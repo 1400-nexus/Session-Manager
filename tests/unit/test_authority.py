@@ -580,10 +580,11 @@ async def test_a_session_that_never_received_a_block_is_swept_to_incomplete() ->
     field_name, message = codec.decode(rig.broadcasts[-1])
     assert field_name == "purge_session"
     assert cast(Any, message).reason == "incomplete"
-    # marked INCOMPLETE with the path the partial was actually moved to
+    # marked INCOMPLETE, handed the path quarantine_incomplete() returned
     [(marked_id, marked_path)] = rig.incomplete_marks
     assert marked_id == SessionId("s-1")
-    assert "quarantine" in marked_path and marked_path.endswith("output.s-1.bin")
+    assert marked_path and "quarantine" in marked_path
+    assert rig.store.quarantined == [("sub/dir/output.bin", SessionId("s-1"))]
 
 
 async def test_a_session_that_went_silent_mid_transfer_is_swept_once_across_ticks() -> None:
@@ -666,8 +667,8 @@ async def test_an_untracked_session_is_logged_loudly_then_purged_after_the_timeo
     assert rig.shm.open_sessions() == ()  # footprint torn down
     # Even here the partial is preserved: nothing was journaled (the
     # aggregator never registered it), so the report is "everything missing".
-    assert rig.store.quarantined == ["sub/dir/output.s-1.bin"]
-    report = rig.store.incomplete_reports["sub/dir/output.s-1.bin"]
+    assert rig.store.quarantined == [("sub/dir/output.bin", SessionId("s-1"))]
+    report = rig.store.incomplete_reports[SessionId("s-1")]
     assert report.decoded_blocks == 0
     assert report.missing_block_ids == tuple(BlockId(i) for i in range(TOTAL_BLOCKS))
 
@@ -745,9 +746,9 @@ async def test_a_swept_session_quarantines_its_partial_with_the_journal_missing_
     rig.clock.advance(45.0)  # 35s past the last block
     await rig.authority._sweep_once()
 
-    assert rig.store.quarantined == ["sub/dir/output.s-1.bin"]  # session id before the extension
+    assert rig.store.quarantined == [("sub/dir/output.bin", SessionId("s-1"))]
     assert "sub/dir/output.bin" not in rig.store.staged
-    report = rig.store.incomplete_reports["sub/dir/output.s-1.bin"]
+    report = rig.store.incomplete_reports[SessionId("s-1")]
     assert report == IncompleteReport(
         session_id=SessionId("s-1"),
         total_blocks=12,
@@ -785,8 +786,8 @@ async def test_the_incomplete_report_is_written_before_tear_down(
     with pytest.raises(RuntimeError, match="crashed mid-teardown"):
         await rig.authority.purge(SessionId("s-1"), PurgeReason.INCOMPLETE)
 
-    assert "sub/dir/output.s-1.bin" in rig.store.incomplete_reports  # step 2 completed
-    assert rig.store.incomplete_reports["sub/dir/output.s-1.bin"].decoded_blocks == 2
+    assert SessionId("s-1") in rig.store.incomplete_reports  # step 2 completed
+    assert rig.store.incomplete_reports[SessionId("s-1")].decoded_blocks == 2
     assert rig.journal.purged == []  # step 3 never ran -- journal still on disk
 
 
@@ -811,11 +812,11 @@ async def test_two_incomplete_transfers_of_one_file_get_separate_partials_and_re
         await rig.authority._sweep_once()
 
     assert sorted(rig.store.quarantined) == [
-        "reports/quarterly.transfer-1.bin",
-        "reports/quarterly.transfer-2.bin",
+        (same_file, SessionId("transfer-1")),
+        (same_file, SessionId("transfer-2")),
     ]
-    assert rig.store.incomplete_reports["reports/quarterly.transfer-1.bin"].decoded_blocks == 1
-    assert rig.store.incomplete_reports["reports/quarterly.transfer-2.bin"].decoded_blocks == 2
+    assert rig.store.incomplete_reports[SessionId("transfer-1")].decoded_blocks == 1
+    assert rig.store.incomplete_reports[SessionId("transfer-2")].decoded_blocks == 2
 
 
 # --- stopping the sweep loop --------------------------------------------
