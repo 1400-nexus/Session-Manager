@@ -168,6 +168,19 @@ it after the first real run than argue it in the abstract.
 - A `BlockDecoded` in flight when purge is sent gets dropped on my side at
   debug level, not warn. Don't treat it as an error on yours either.
 
+> **Repo note (added on commit, not part of C's reply) — `PurgeSession.reason`
+> is a wire break, not a new field.** `rx.proto.patch.md` changes field 2 from
+> `string reason` to `enum PurgeReason reason`. §2 above ("I added it beyond
+> your ask") and "What I still need from you" #3 read as if `reason` is being
+> added; it already exists as `string reason = 2` at the current pin, carrying
+> `"verified"` / `"hash_mismatch"` / `"incomplete"` — three values the manager
+> emits today (`SessionAuthority._PURGE_REASON_WIRE`) and RECEIVER_CONTRACT.md
+> §4 documents. Retyping field 2 breaks any peer already parsing the string.
+> **Vetoing the enum is reasonable** — the string form works, the receiver's
+> action is identical for all three reasons, and it keeps the proto commit to
+> the one field that isn't optional (`file_size = 9`). If it goes ahead,
+> `_PURGE_REASON_WIRE` and the `purge_policy.py` module docstring both flip.
+
 ---
 
 ## What has actually been done
