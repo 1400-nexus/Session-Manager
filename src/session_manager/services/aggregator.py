@@ -62,6 +62,9 @@ class _SessionProgress:
     # idle relative to it.
     last_progress_at: float
     state: SessionState = SessionState.OPEN
+    # Set alongside a HASH_MISMATCH / INCOMPLETE mark: the path the partial
+    # was quarantined to. Carried on the snapshot so the display can show it.
+    quarantine_path: str | None = None
 
 
 class ProgressAggregator:
@@ -182,27 +185,37 @@ class ProgressAggregator:
         """
         self._set_terminal_state(session_id, SessionState.VERIFIED)
 
-    def mark_hash_mismatch(self, session_id: SessionId) -> None:
-        """Record that `on_complete`'s verify failed and the file was quarantined."""
-        self._set_terminal_state(session_id, SessionState.HASH_MISMATCH)
+    def mark_hash_mismatch(self, session_id: SessionId, quarantine_path: str) -> None:
+        """Record that `on_complete`'s verify failed and the file was quarantined.
 
-    def mark_incomplete(self, session_id: SessionId) -> None:
-        """Record that `SessionAuthority`'s sweep declared this session stalled.
-
-        Same shape as `mark_verified` / `mark_hash_mismatch`: the aggregator
-        does not decide a stall, it is told -- and then `poll()` stops
-        rebuilding the snapshot so the status display keeps showing INCOMPLETE.
+        `quarantine_path` is what `Publisher.quarantine` returned -- shown in
+        the status view so the quarantined file is findable from the screen.
         """
-        self._set_terminal_state(session_id, SessionState.INCOMPLETE)
+        self._set_terminal_state(session_id, SessionState.HASH_MISMATCH, quarantine_path)
 
-    def _set_terminal_state(self, session_id: SessionId, state: SessionState) -> None:
+    def mark_incomplete(self, session_id: SessionId, quarantine_path: str) -> None:
+        """Record that `SessionAuthority`'s sweep declared this session stalled
+        and quarantined its partial (at `quarantine_path`).
+
+        Like `mark_hash_mismatch`, the aggregator does not decide the outcome
+        -- it is told -- and then `poll()` stops rebuilding the snapshot so
+        the status display keeps showing INCOMPLETE and where the partial is.
+        """
+        self._set_terminal_state(session_id, SessionState.INCOMPLETE, quarantine_path)
+
+    def _set_terminal_state(
+        self, session_id: SessionId, state: SessionState, quarantine_path: str | None = None
+    ) -> None:
         progress = self._sessions.get(session_id)
         if progress is None:
             return
         progress.state = state
+        progress.quarantine_path = quarantine_path
         snapshot = self._snapshots.get(session_id)
         if snapshot is not None:
-            self._snapshots[session_id] = replace(snapshot, state=state)
+            self._snapshots[session_id] = replace(
+                snapshot, state=state, quarantine_path=quarantine_path
+            )
 
     async def run(self) -> None:
         while True:
@@ -247,6 +260,7 @@ class ProgressAggregator:
             missing_blocks=missing_full[:MISSING_BLOCKS_PREVIEW_LIMIT],
             missing_block_count=len(missing_full),
             seconds_since_progress=max(0.0, now - progress.last_progress_at),
+            quarantine_path=progress.quarantine_path,
         )
 
     def _cross_check(self, session_id: SessionId, uds_count: int) -> None:

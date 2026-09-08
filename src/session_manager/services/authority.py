@@ -43,9 +43,10 @@ OnSessionOpened = Callable[[SessionSpec, Collection[BlockId]], None]
 # restart is the adoption instant, so a recovered session gets fresh grace
 # without the authority tracking anything itself.
 DecodedProgress = Callable[[SessionId], tuple[int, float, tuple[BlockId, ...]] | None]
-# Told the aggregator a session's terminal outcome so the status display
-# stops rebuilding its snapshot -- same shape as mark_verified / _hash_mismatch.
-MarkTerminal = Callable[[SessionId], None]
+# Told the aggregator a session was swept INCOMPLETE and where its partial
+# was quarantined, so the status display freezes the snapshot and shows the
+# path -- `aggregator.mark_incomplete`.
+MarkIncomplete = Callable[[SessionId, str], None]
 # Move a stalled session's partial into quarantine/ with its missing-blocks
 # report -- Publisher.quarantine_incomplete. Injected rather than reached for
 # directly so the authority stays out of the output/quarantine directories,
@@ -125,7 +126,7 @@ class SessionAuthority:
         on_session_opened: OnSessionOpened,
         clock: Clock,
         progress_of: DecodedProgress,
-        on_incomplete: MarkTerminal,
+        on_incomplete: MarkIncomplete,
         quarantine_incomplete: QuarantineIncomplete,
         shm_name: str,
         staging_dir: str,
@@ -145,7 +146,7 @@ class SessionAuthority:
         self._on_session_opened: OnSessionOpened = on_session_opened
         self._clock: Clock = clock
         self._progress_of: DecodedProgress = progress_of
-        self._on_incomplete: MarkTerminal = on_incomplete
+        self._on_incomplete: MarkIncomplete = on_incomplete
         self._quarantine_incomplete: QuarantineIncomplete = quarantine_incomplete
         self._shm_name: str = shm_name
         self._staging_dir: str = staging_dir
@@ -370,7 +371,13 @@ class SessionAuthority:
             decoded_blocks=spec.total_blocks - len(missing),
             missing_block_ids=missing,
         )
-        self._quarantine_incomplete(spec, report)
+        quarantined_path = self._quarantine_incomplete(spec, report)
+        # Freeze the aggregator's snapshot at INCOMPLETE and hand it the path,
+        # now that the move has happened -- so the status view shows where the
+        # partial went. Kept here, after the quarantine, rather than at the
+        # sweep call site so the snapshot never carries a path the file isn't
+        # at yet.
+        self._on_incomplete(session_id, str(quarantined_path))
 
     def _tear_down(self, session_id: SessionId) -> None:
         # Remove the session's durable footprint so an adopting restart does
@@ -487,7 +494,9 @@ class SessionAuthority:
             missing_block_count=spec.total_blocks - decoded_count,
             missing_blocks_preview=[int(block_id) for block_id in missing_preview],
         )
-        self._on_incomplete(session_id)
+        # purge() -> _preserve_incomplete_partial() calls _on_incomplete once
+        # the partial is quarantined, so the frozen snapshot carries the real
+        # path.
         await self.purge(session_id, PurgeReason.INCOMPLETE)
 
     async def _handle_untracked(self, session_id: SessionId, spec: SessionSpec, now: float) -> None:
@@ -512,7 +521,6 @@ class SessionAuthority:
         if now - first_seen < self._stall_timeout_s:
             return
         logger.error("purging_untracked_session", session_id=session_id)
-        self._on_incomplete(session_id)
         await self.purge(session_id, PurgeReason.INCOMPLETE)
 
     async def _recover(self) -> None:

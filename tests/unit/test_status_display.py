@@ -58,6 +58,7 @@ def _snapshot(
     missing_blocks: tuple[BlockId, ...] = (),
     missing_block_count: int = 0,
     seconds_since_progress: float = 0.0,
+    quarantine_path: str | None = None,
 ) -> SessionSnapshot:
     return SessionSnapshot(
         spec=_spec(session_id, total_blocks),
@@ -70,6 +71,7 @@ def _snapshot(
         missing_blocks=missing_blocks,
         missing_block_count=missing_block_count,
         seconds_since_progress=seconds_since_progress,
+        quarantine_path=quarantine_path,
     )
 
 
@@ -112,6 +114,37 @@ def test_render_shows_a_stalled_session_with_its_missing_block_count() -> None:
     assert "INCOMPLETE" in text
     assert "2/5" in text
     assert "3" in text
+
+
+def test_render_shows_where_a_terminal_session_was_quarantined() -> None:
+    path = "/var/nexus/staging/quarantine/reports/q3.a3f9c1d2e4b50678.bin"
+    mismatch = _snapshot(session_id="s-1", state=SessionState.HASH_MISMATCH, quarantine_path=path)
+    stalled = _snapshot(
+        session_id="s-2",
+        state=SessionState.INCOMPLETE,
+        quarantine_path="/var/nexus/staging/quarantine/big.bbbb2222.bin",
+    )
+
+    text = _rendered_text([mismatch, stalled])
+
+    assert "Quarantined" in text
+    assert "q3.a3f9c1d2e4b50678.bin" in text
+    assert "big.bbbb2222.bin" in text
+
+
+def test_render_has_no_quarantine_block_when_nothing_is_quarantined() -> None:
+    text = _rendered_text([_snapshot(state=SessionState.COMPLETE)])
+
+    assert "Quarantined" not in text
+
+
+def test_log_status_carries_the_quarantine_path() -> None:
+    path = "/q/data.deadbeefdeadbeef.bin"
+    with capture_logs() as logs:
+        log_status([_snapshot(state=SessionState.HASH_MISMATCH, quarantine_path=path)])
+
+    event = next(entry for entry in logs if entry["event"] == "status")
+    assert event["sessions"][0]["quarantine_path"] == path
 
 
 def test_render_shows_a_dead_receiver() -> None:
@@ -248,6 +281,7 @@ def test_log_status_emits_one_event_with_the_same_fields_as_the_tables() -> None
             "observed_loss_pct": 1.23,
             "seconds_since_last_block": 12.3,
             "missing_block_count": 0,
+            "quarantine_path": None,
         }
     ]
     assert events[0]["receivers"] == [

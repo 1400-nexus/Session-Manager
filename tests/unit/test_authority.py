@@ -93,7 +93,13 @@ class _Rig:
     broadcasts: list[bytes] = field(default_factory=list)
     sends: list[tuple[ReceiverId, bytes]] = field(default_factory=list)
     opened: list[tuple[SessionSpec, frozenset[BlockId]]] = field(default_factory=list)
-    incomplete: list[SessionId] = field(default_factory=list)
+    # (session_id, quarantine_path) each time the authority marked a session
+    # INCOMPLETE. `incomplete` keeps just the ids for the common assertion.
+    incomplete_marks: list[tuple[SessionId, str]] = field(default_factory=list)
+
+    @property
+    def incomplete(self) -> list[SessionId]:
+        return [session_id for session_id, _ in self.incomplete_marks]
 
     def set_progress(
         self,
@@ -135,7 +141,7 @@ def _rig(
     broadcasts: list[bytes] = []
     sends: list[tuple[ReceiverId, bytes]] = []
     opened: list[tuple[SessionSpec, frozenset[BlockId]]] = []
-    incomplete: list[SessionId] = []
+    incomplete_marks: list[tuple[SessionId, str]] = []
 
     async def broadcast(payload: bytes) -> None:
         # broadcast_gate set -> broadcasts pass; cleared -> broadcasts wedge.
@@ -163,7 +169,7 @@ def _rig(
         on_session_opened=on_session_opened,
         clock=clock,
         progress_of=progress_of,
-        on_incomplete=incomplete.append,
+        on_incomplete=lambda session_id, path: incomplete_marks.append((session_id, path)),
         quarantine_incomplete=Publisher(store).quarantine_incomplete,
         shm_name=SHM_NAME,
         staging_dir="/var/nexus/staging",
@@ -185,7 +191,7 @@ def _rig(
         broadcasts,
         sends,
         opened,
-        incomplete,
+        incomplete_marks,
     )
 
 
@@ -574,7 +580,10 @@ async def test_a_session_that_never_received_a_block_is_swept_to_incomplete() ->
     field_name, message = codec.decode(rig.broadcasts[-1])
     assert field_name == "purge_session"
     assert cast(Any, message).reason == "incomplete"
-    assert rig.incomplete == [SessionId("s-1")]
+    # marked INCOMPLETE with the path the partial was actually moved to
+    [(marked_id, marked_path)] = rig.incomplete_marks
+    assert marked_id == SessionId("s-1")
+    assert "quarantine" in marked_path and marked_path.endswith("output.s-1.bin")
 
 
 async def test_a_session_that_went_silent_mid_transfer_is_swept_once_across_ticks() -> None:

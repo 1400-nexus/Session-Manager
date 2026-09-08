@@ -153,10 +153,38 @@ def _receivers_table(snapshots: Sequence[SessionSnapshot]) -> Table:
     return table
 
 
+def _quarantine_table(snapshots: Sequence[SessionSnapshot]) -> Table | None:
+    # Only rendered when something is quarantined -- a terminal
+    # HASH_MISMATCH / INCOMPLETE session whose partial was moved aside. The
+    # Sessions table has no room for a full path; this answers "where did the
+    # failed transfer's bytes go" without crowding it or scrolling a log.
+    rows = [
+        (str(snapshot.spec.session_id), snapshot.state.name, snapshot.quarantine_path)
+        for snapshot in snapshots
+        if snapshot.quarantine_path is not None
+    ]
+    if not rows:
+        return None
+    table = Table(title="Quarantined", expand=True)
+    table.add_column("Session")
+    table.add_column("Outcome")
+    table.add_column("Path", overflow="fold")
+    for session_id, outcome, path in rows:
+        table.add_row(session_id, outcome, Text(path, style="yellow"))
+    return table
+
+
 def render(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float) -> RenderableType:
     """Pure: snapshots (+ the stall timeout, for idle styling) in, a `rich`
     renderable out. No clock, no state, no I/O."""
-    return Group(_sessions_table(snapshots, stall_timeout_s), _receivers_table(snapshots))
+    parts: list[RenderableType] = [
+        _sessions_table(snapshots, stall_timeout_s),
+        _receivers_table(snapshots),
+    ]
+    quarantine_table = _quarantine_table(snapshots)
+    if quarantine_table is not None:
+        parts.append(quarantine_table)
+    return Group(*parts)
 
 
 def _session_fields(snapshot: SessionSnapshot) -> dict[str, Any]:
@@ -168,6 +196,7 @@ def _session_fields(snapshot: SessionSnapshot) -> dict[str, Any]:
         "observed_loss_pct": round(snapshot.observed_loss_pct, _LOSS_PCT_DIGITS),
         "seconds_since_last_block": round(snapshot.seconds_since_progress, _IDLE_SECONDS_DIGITS),
         "missing_block_count": snapshot.missing_block_count,
+        "quarantine_path": snapshot.quarantine_path,
     }
 
 

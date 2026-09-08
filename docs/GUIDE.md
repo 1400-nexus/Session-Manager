@@ -382,7 +382,11 @@ publish only what verified, display status. Its entire authoritative state for a
    not its original open time — otherwise a restart purges every live
    transfer on the first sweep.
    The status display's **Idle** column shows time-since-last-block, styled
-   yellow past half the stall timeout and red past 90%.
+   yellow past half the stall timeout and red past 90%; a **Quarantined**
+   block appears below the tables (only when non-empty) listing each
+   `HASH_MISMATCH` / `INCOMPLETE` session and the path its file was moved to
+   — the actual `quarantine()` return, carried on the frozen snapshot, so
+   "where's the failed transfer's bytes" is answerable from the screen.
 
 ### Adopt-vs-create: the sharpest edge in the system
 

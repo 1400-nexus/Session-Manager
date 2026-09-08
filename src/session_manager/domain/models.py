@@ -125,6 +125,12 @@ class SessionSnapshot:
     # its idle column off this; the authority's stall decision keys off the
     # underlying timestamp, not this derived value.
     seconds_since_progress: float
+    # Where the staged file landed for a HASH_MISMATCH or INCOMPLETE session
+    # -- the actual path Publisher.quarantine[_incomplete] returned, so the
+    # status view can answer "the transfer failed, where's the partial"
+    # without anyone reading back through the logs. None while OPEN/COMPLETE
+    # and for a VERIFIED session (that file is in the output dir).
+    quarantine_path: str | None = None
 
     def counters_for(self, receiver_id: ReceiverId) -> ReceiverCounters | None:
         for candidate_id, counters in self.per_receiver:

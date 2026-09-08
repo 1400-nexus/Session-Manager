@@ -157,11 +157,12 @@ async def test_mark_incomplete_freezes_the_snapshot_at_incomplete() -> None:
     rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 2])
     await rig.aggregator.poll()
 
-    rig.aggregator.mark_incomplete(spec.session_id)
+    rig.aggregator.mark_incomplete(spec.session_id, "/var/nexus/staging/quarantine/f.s-1.bin")
 
     snapshot = rig.aggregator.snapshot_for(spec.session_id)
     assert snapshot is not None
     assert snapshot.state is SessionState.INCOMPLETE
+    assert snapshot.quarantine_path == "/var/nexus/staging/quarantine/f.s-1.bin"
 
     rig.aggregator.handle_block_decoded(R0, spec.session_id, [1, 3, 4])
     await rig.aggregator.poll()  # a terminal session is not rebuilt
@@ -338,11 +339,12 @@ async def test_mark_hash_mismatch_sets_a_terminal_state() -> None:
     rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1, 2])
     await rig.aggregator.poll()
 
-    rig.aggregator.mark_hash_mismatch(spec.session_id)
+    rig.aggregator.mark_hash_mismatch(spec.session_id, "/q/f.s-1.bin")
 
     snapshot = rig.aggregator.snapshot_for(spec.session_id)
     assert snapshot is not None
     assert snapshot.state is SessionState.HASH_MISMATCH
+    assert snapshot.quarantine_path == "/q/f.s-1.bin"
 
     await rig.aggregator.poll()  # must not rebuild the snapshot back to COMPLETE
     snapshot_after = rig.aggregator.snapshot_for(spec.session_id)

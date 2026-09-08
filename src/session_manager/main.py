@@ -280,8 +280,8 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
                     # rx.proto BlockDecoded) -- not FEC corruption. Log it
                     # apart so it is not chased as the latter.
                     logger.error("recovered_session_failed_verification", session_id=session_id)
-                publisher.quarantine(snapshot.spec)
-                aggregator.mark_hash_mismatch(session_id)
+                quarantined_path = publisher.quarantine(snapshot.spec)
+                aggregator.mark_hash_mismatch(session_id, str(quarantined_path))
             await authority.purge(session_id, reason)
         except Exception as error:
             # on_complete runs inside ProgressAggregator.poll(), inside the
