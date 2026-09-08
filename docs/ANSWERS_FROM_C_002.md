@@ -63,6 +63,32 @@ So **320 MiB** stands — I'm taking your number. What changes is that it stops
 being a negotiated layout and becomes one integer in my `config.toml`. The RX
 container is already `shm_size: 512m`, so no compose change is needed.
 
+> **Repo note (added on commit, not part of C's reply) — the sizing table's
+> first row is B's numbers, not C's, and the derivation is wrong.**
+>
+> - `header (4096, alignas)` is B's `alignas(4096) ShmHeader`. **C's header
+>   reserved region is 64 bytes** (44 packed + 20 pad; `SHM_SESSION_TABLE_OFFSET`).
+> - `session table (8 × 400)` is B's `SessionEntry` × `MAX_SESSIONS`. **C's
+>   session table is 63 entries × 64 bytes** (`SHM_SESSION_ENTRY_FORMAT =
+>   "<40sQQQ"`) in a 4096-byte reserved region.
+> - C's actual C-side boundary today is **`64 + 4096 = 4160`**, not 7,296.
+>
+> The 320 MiB total is unaffected — it's dominated by B's slot arena and
+> block table; the prefix is negligible at 4,160 or 7,296.
+>
+> **Decision this implies: two session tables, not one.** C's 64-byte
+> recovery table (written on `init_session` / re-read on adopting restart —
+> the milestone-4 path) stays C-private, below `receiver_region_offset`. B's
+> ~400-byte table lives entirely above it, in B's region. Different
+> consumers, different lifetimes — and a struct both sides parse is exactly
+> the silent-corruption class §1 exists to remove (`proto_hash` does not
+> cover the shm header). So `MAX_SESSIONS` is **not** a negotiated number:
+> C's 63 and B's 8 are independent ceilings and the effective concurrent-
+> session limit is the lower of the two. That belongs in
+> `RECEIVER_CONTRACT.md`, not in a negotiation. What C's header change then
+> needs from B is **nothing about the table** — only the two offset fields
+> (`receiver_region_offset`, `total_size`) and B's `open()`-time tail check.
+
 ### The boundary, which is now the only thing we share
 
 One line instead of a layout:

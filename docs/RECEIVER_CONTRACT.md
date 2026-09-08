@@ -413,7 +413,8 @@ operator spot a segment left by a previous boot.
 
 A `uint32` LE count, followed by that many fixed entries
 (`SHM_SESSION_ENTRY_FORMAT = "<40sQQQ"`, **64 bytes** each). Reserved region is
-`SHM_SESSION_TABLE_BYTES = 4096`.
+`SHM_SESSION_TABLE_BYTES = 4096`, so the manager holds **at most 63 concurrent
+sessions** (`(4096 − 4) / 64`).
 
 | Field | C++ type | Offset in entry | Width |
 |---|---|---:|---:|
@@ -422,10 +423,18 @@ A `uint32` LE count, followed by that many fixed entries
 | `block_table_offset` | `uint64_t` LE | 48 | 8 |
 | `bitmap_offset` | `uint64_t` LE | 56 | 8 |
 
-The manager writes this table when it opens a session and re-reads it on an
-adopting restart to learn which sessions are already running. You can read it,
-or you can take the same offsets straight from `SessionOpen` fields 7 and 8 —
-they are identical.
+This is the manager's **private recovery table** — written on session open,
+re-read on an adopting restart to learn which sessions are already running.
+It is not the receiver's session bookkeeping: keep your own table in your own
+region. The two are independent, with independent ceilings — the effective
+concurrent-session limit is the **lower of the manager's 63 and your
+`MAX_SESSIONS`**, and neither side negotiates the other's.
+
+You can read this table, or take the per-session offsets straight from
+`SessionOpen` fields 7 and 8 — they are identical. (Both go away with the
+header change in `ANSWERS_FROM_C_002.md` §1: `BlockDecoded` over UDS is the
+only progress path, so the manager stops carving per-session bitmap regions
+and `SessionOpen.7`/`.8` become `reserved`.)
 
 ### Per-session regions
 
