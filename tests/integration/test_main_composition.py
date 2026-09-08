@@ -39,9 +39,7 @@ def _config(tmp_path: Path) -> AppConfig:
         shm=ShmConfig(
             name=f"nx-test-{uuid.uuid4().hex[:16]}", arena_bytes=1 << 20, slot_bytes=4096
         ),
-        aggregation=AggregationConfig(
-            poll_interval_s=0.05, stall_timeout_s=1.0, shm_crosscheck=True
-        ),
+        aggregation=AggregationConfig(poll_interval_s=0.05, shm_crosscheck=True),
         receivers=ReceiversConfig(count=0, ports=(), binary_path=""),
         supervision=SupervisionConfig(),
         status=StatusConfig(refresh_interval_s=0.05, force_terminal=False),

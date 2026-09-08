@@ -652,7 +652,6 @@ the schema implies them:
 | `shm.arena_bytes` | 268,435,456 | 256 MiB → compose needs `shm_size: 512m` |
 | `shm.slot_bytes` | 4,194,304 | 4 MiB → 64 slots; `MIN_ARENA_SLOTS = 4` |
 | `aggregation.poll_interval_s` | 1.0 | how often `BlockDecoded` folds are turned into snapshots / COMPLETE |
-| `aggregation.stall_timeout_s` | 8.0 | **vestigial** — stall detection moved to `[purge]`; still loaded and validated, read by nothing |
 | `aggregation.shm_crosscheck` | **false** | off until a receiver writes the bitmap. **`DEFAULT_SHM_CROSSCHECK` in code is `True`** — the value if the key is absent |
 | `purge.sweep_interval_seconds` | 5.0 | `SessionAuthority` sweeps open sessions this often for a terminal state |
 | `purge.stall_timeout_seconds` | 60.0 | no `BlockDecoded` for this long → `INCOMPLETE` + `PurgeSession`; also drives the status display's Idle column styling. **Placeholder** pending A's sender pacing |

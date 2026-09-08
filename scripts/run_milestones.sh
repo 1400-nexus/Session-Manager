@@ -60,7 +60,6 @@ slot_bytes = 4096
 
 [aggregation]
 poll_interval_s = 0.2
-stall_timeout_s = 1.5
 # Off: no receiver here writes the shm bitmap, so with it on every session
 # "diverges" (bitmap 0 vs a climbing UDS count) forever. The UDS
 # BlockDecoded stream is authoritative on its own.

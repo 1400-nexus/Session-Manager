@@ -394,9 +394,7 @@ def test_build_receiver_specs_one_per_configured_receiver() -> None:
             lock_path=Path("run/x.lock"),
         ),
         shm=ShmConfig(name="n", arena_bytes=4096, slot_bytes=1024),
-        aggregation=AggregationConfig(
-            poll_interval_s=1.0, stall_timeout_s=8.0, shm_crosscheck=True
-        ),
+        aggregation=AggregationConfig(poll_interval_s=1.0, shm_crosscheck=True),
         receivers=ReceiversConfig(count=2, ports=(9100, 9101, 9102), binary_path="./bin/rx"),
         supervision=SupervisionConfig(),
         status=StatusConfig(refresh_interval_s=0.5, force_terminal=False),

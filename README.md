@@ -94,7 +94,6 @@ file's own directory*, not the process's working directory.
 | `shm.arena_bytes` | `NEXUS_SHM_ARENA_BYTES` | `268435456` | Segment size (256 MB). A container needs `shm_size` ≥ this. |
 | `shm.slot_bytes` | `NEXUS_SHM_SLOT_BYTES` | `4194304` | Must divide `arena_bytes`; arena must hold ≥ 4 slots. |
 | `aggregation.poll_interval_s` | `NEXUS_AGGREGATION_POLL_INTERVAL_S` | `1.0` | How often completion state is recomputed. |
-| `aggregation.stall_timeout_s` | `NEXUS_AGGREGATION_STALL_TIMEOUT_S` | `8.0` | Vestigial — stall detection moved to `purge.stall_timeout_seconds`; still loaded and validated, read by nothing. |
 | `aggregation.shm_crosscheck` | `NEXUS_AGGREGATION_SHM_CROSSCHECK` | `false` | Cross-check the UDS decoded count against the shm bitmap popcount. Off until a receiver actually writes the bitmap; the UDS `BlockDecoded` stream is authoritative on its own. |
 | `purge.sweep_interval_seconds` | `NEXUS_PURGE_SWEEP_INTERVAL_SECONDS` | `5.0` | How often the session authority sweeps open sessions for a terminal state. Must be `< stall_timeout_seconds`. |
 | `purge.stall_timeout_seconds` | `NEXUS_PURGE_STALL_TIMEOUT_SECONDS` | `60.0` | No `BlockDecoded` for this long → `INCOMPLETE` + `PurgeSession`. Placeholder pending the sender's pacing numbers. |

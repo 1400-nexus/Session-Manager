@@ -25,7 +25,6 @@ from session_manager.constants import (
     DEFAULT_SLOT_BYTES,
     DEFAULT_SOCKET_PATH,
     DEFAULT_STAGING_DIR,
-    DEFAULT_STALL_TIMEOUT_S,
     DEFAULT_STALL_TIMEOUT_SECONDS,
     DEFAULT_SWEEP_INTERVAL_S,
     FORCE_TERMINAL_ENV_VAR,
@@ -66,8 +65,6 @@ from session_manager.constants import (
     SOCKET_PATH_KEY,
     STAGING_DIR_ENV_VAR,
     STAGING_DIR_KEY,
-    STALL_TIMEOUT_S_ENV_VAR,
-    STALL_TIMEOUT_S_KEY,
     STALL_TIMEOUT_SECONDS_ENV_VAR,
     STALL_TIMEOUT_SECONDS_KEY,
     STATUS_SECTION,
@@ -106,7 +103,6 @@ ENV_OVERRIDES: tuple[tuple[str, str, str, Callable[[str], Any]], ...] = (
     (ARENA_BYTES_ENV_VAR, SHM_SECTION, ARENA_BYTES_KEY, int),
     (SLOT_BYTES_ENV_VAR, SHM_SECTION, SLOT_BYTES_KEY, int),
     (POLL_INTERVAL_S_ENV_VAR, AGGREGATION_SECTION, POLL_INTERVAL_S_KEY, float),
-    (STALL_TIMEOUT_S_ENV_VAR, AGGREGATION_SECTION, STALL_TIMEOUT_S_KEY, float),
     (SHM_CROSSCHECK_ENV_VAR, AGGREGATION_SECTION, SHM_CROSSCHECK_KEY, _parse_bool),
     (RECEIVER_COUNT_ENV_VAR, RECEIVERS_SECTION, RECEIVER_COUNT_KEY, int),
     (RECEIVER_PORTS_ENV_VAR, RECEIVERS_SECTION, RECEIVER_PORTS_KEY, _parse_port_list),
@@ -138,7 +134,6 @@ class ShmConfig:
 @dataclass(frozen=True)
 class AggregationConfig:
     poll_interval_s: float
-    stall_timeout_s: float
     shm_crosscheck: bool
 
 
@@ -259,9 +254,6 @@ def load_config(config_path: Path) -> AppConfig:
             poll_interval_s=float(
                 aggregation_data.get(POLL_INTERVAL_S_KEY, DEFAULT_POLL_INTERVAL_S)
             ),
-            stall_timeout_s=float(
-                aggregation_data.get(STALL_TIMEOUT_S_KEY, DEFAULT_STALL_TIMEOUT_S)
-            ),
             shm_crosscheck=bool(aggregation_data.get(SHM_CROSSCHECK_KEY, DEFAULT_SHM_CROSSCHECK)),
         ),
         receivers=ReceiversConfig(
@@ -346,16 +338,6 @@ def validate_config(app_config: AppConfig) -> None:
     if aggregation.poll_interval_s <= 0:
         raise ValueError(
             f"aggregation.poll_interval_s must be > 0, got {aggregation.poll_interval_s}"
-        )
-    if aggregation.stall_timeout_s <= 0:
-        raise ValueError(
-            f"aggregation.stall_timeout_s must be > 0, got {aggregation.stall_timeout_s}"
-        )
-    if aggregation.poll_interval_s >= aggregation.stall_timeout_s:
-        raise ValueError(
-            f"aggregation.poll_interval_s ({aggregation.poll_interval_s}) must be < "
-            f"aggregation.stall_timeout_s ({aggregation.stall_timeout_s}) or a stall can "
-            "never be observed"
         )
 
     if app_config.status.refresh_interval_s <= 0:

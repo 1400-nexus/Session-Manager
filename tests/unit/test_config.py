@@ -30,7 +30,6 @@ def _valid_sections() -> dict[str, dict[str, object]]:
         "shm": {"name": "t", "arena_bytes": 40, "slot_bytes": 10},
         "aggregation": {
             "poll_interval_s": 1.0,
-            "stall_timeout_s": 8.0,
             "shm_crosscheck": True,
         },
         "receivers": {"count": 0, "ports": [9100, 9101, 9102], "binary_path": "bin/rx"},
@@ -180,12 +179,11 @@ def test_binary_path_is_required_when_supervising_receivers(tmp_path: Path) -> N
         config.load_config(_write_config(tmp_path, sections))
 
 
-def test_poll_interval_must_be_shorter_than_the_stall_timeout(tmp_path: Path) -> None:
+def test_poll_interval_must_be_positive(tmp_path: Path) -> None:
     sections = _valid_sections()
-    sections["aggregation"]["poll_interval_s"] = 8.0
-    sections["aggregation"]["stall_timeout_s"] = 8.0
+    sections["aggregation"]["poll_interval_s"] = 0.0
 
-    with pytest.raises(ValueError, match="poll_interval_s"):
+    with pytest.raises(ValueError, match="aggregation.poll_interval_s"):
         config.load_config(_write_config(tmp_path, sections))
 
 
