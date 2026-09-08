@@ -8,8 +8,13 @@ to match on today's build machine is not mistaken for the contract.
 
 Header fields, in order: magic (4 bytes), version (u32), boot_id (16 bytes),
 owner_pid (u32), slot_bytes (u32), slot_count (u32), session_table_offset
-(u64). Validity is magic + version only; the rest is informational for
-operators and for detecting a segment left by a previous boot.
+(u64). Validity is magic + version only; boot_id / owner_pid are for spotting
+a segment left by a previous boot.
+
+`slot_bytes` and `slot_count` are a slot model the manager does not use --
+not the receiver's slot geometry, do not read or derive from them; removed in
+the next shm header revision. The fields a receiver may rely on are magic,
+version, and session_table_offset.
 """
 
 import struct
@@ -48,6 +53,9 @@ class SegmentHeader:
     version: int
     boot_id: bytes
     owner_pid: int
+    # slot_bytes / slot_count: a slot model the manager does not use -- not the
+    # receiver's slot geometry, do not read or derive from them; removed in the
+    # next shm header revision.
     slot_bytes: int
     slot_count: int
     session_table_offset: int

@@ -22,6 +22,10 @@ JOURNAL_SYNC_BATCH_SIZE = 200
 # Shared-memory completion segment header. The C++ receivers parse these exact
 # bytes, so the format is a cross-language contract: explicit little-endian
 # and standard packing (no native alignment padding). See adapters/shm_layout.py.
+# The real contract is magic, version and session_table_offset. The two u32s
+# between owner_pid and session_table_offset -- slot_bytes, slot_count -- are a
+# slot model the manager does not use -- not the receiver's slot geometry, do
+# not read or derive from them; removed in the next shm header revision.
 SHM_HEADER_FORMAT = "<4sI16sIIIQ"
 SHM_MAGIC = b"NXRX"
 SHM_VERSION = 1

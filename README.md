@@ -97,7 +97,7 @@ file's own directory*, not the process's working directory.
 | `paths.lock_path` | `NEXUS_LOCK_PATH` | `./run/session-manager.lock` | `fcntl` single-instance lock. |
 | `shm.name` | `NEXUS_SHM_NAME` | `nexus-rx` | Completion segment name. **Receivers that write the bitmap must use the same value.** |
 | `shm.arena_bytes` | `NEXUS_SHM_ARENA_BYTES` | `268435456` | Segment size (256 MB). A container needs `shm_size` ≥ this. |
-| `shm.slot_bytes` | `NEXUS_SHM_SLOT_BYTES` | `4194304` | Must divide `arena_bytes`; arena must hold ≥ 4 slots. |
+| `shm.slot_bytes` | `NEXUS_SHM_SLOT_BYTES` | `4194304` | Stamped into the header as `slot_bytes` / `slot_count` — a slot model the manager does not use — not the receiver's slot geometry, do not read or derive from them; removed in the next shm header revision. |
 | `aggregation.poll_interval_s` | `NEXUS_AGGREGATION_POLL_INTERVAL_S` | `1.0` | How often completion state is recomputed. |
 | `aggregation.shm_crosscheck` | `NEXUS_AGGREGATION_SHM_CROSSCHECK` | `false` | Cross-check the UDS decoded count against the shm bitmap popcount. Off until a receiver actually writes the bitmap; the UDS `BlockDecoded` stream is authoritative on its own. |
 | `purge.sweep_interval_seconds` | `NEXUS_PURGE_SWEEP_INTERVAL_SECONDS` | `5.0` | How often the session authority sweeps open sessions for a terminal state. Must be `< stall_timeout_seconds`. |

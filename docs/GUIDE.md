@@ -683,7 +683,7 @@ the schema implies them:
 | `paths.lock_path` | `./run/session-manager.lock` | `flock` target |
 | `shm.name` | `nexus-rx` | receivers learn it from `Config` |
 | `shm.arena_bytes` | 268,435,456 | 256 MiB → compose needs `shm_size: 512m` |
-| `shm.slot_bytes` | 4,194,304 | 4 MiB → 64 slots; `MIN_ARENA_SLOTS = 4` |
+| `shm.slot_bytes` | 4,194,304 | stamped into the header as `slot_bytes` / `slot_count` — a slot model the manager does not use — not the receiver's slot geometry, do not read or derive from them; removed in the next shm header revision |
 | `aggregation.poll_interval_s` | 1.0 | how often `BlockDecoded` folds are turned into snapshots / COMPLETE |
 | `aggregation.shm_crosscheck` | **false** | off until a receiver writes the bitmap. **`DEFAULT_SHM_CROSSCHECK` in code is `True`** — the value if the key is absent |
 | `purge.sweep_interval_seconds` | 5.0 | `SessionAuthority` sweeps open sessions this often for a terminal state |

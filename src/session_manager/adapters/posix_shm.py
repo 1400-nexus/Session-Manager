@@ -235,6 +235,10 @@ class PosixShm:
         }
 
     def _write_header(self, buffer: memoryview) -> None:
+        # slot_bytes / slot_count are a slot model the manager does not use --
+        # not the receiver's slot geometry, do not read or derive from them;
+        # removed in the next shm header revision. Written only because the
+        # header format still has the fields; nothing reads them back.
         slot_count = len(buffer) // self._slot_bytes if self._slot_bytes else 0
         buffer[:HEADER_SIZE] = build_header(
             self._boot_id, os.getpid(), self._slot_bytes, slot_count
