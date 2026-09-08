@@ -387,13 +387,27 @@ segment.
 | `version` | `uint32_t` LE | 4 | 4 | `1` (`SHM_VERSION`) |
 | `boot_id` | `uint8_t[16]` | 8 | 16 | random, regenerated each manager start |
 | `owner_pid` | `uint32_t` LE | 24 | 4 | manager PID |
-| `slot_bytes` | `uint32_t` LE | 28 | 4 | `[shm].slot_bytes` |
-| `slot_count` | `uint32_t` LE | 32 | 4 | `arena_bytes / slot_bytes` |
+| `slot_bytes` | `uint32_t` LE | 28 | 4 | `[shm].slot_bytes` — **do not read** (see below) |
+| `slot_count` | `uint32_t` LE | 32 | 4 | `arena_bytes / slot_bytes` — **do not read** |
 | `session_table_offset` | `uint64_t` LE | 36 | 8 | `64` (`SHM_SESSION_TABLE_OFFSET`) |
 
 Packed size is **44 bytes**; bytes 44–63 are reserved. **Validity is `magic` +
 `version` only.** The rest is informational — `boot_id` / `owner_pid` let an
 operator spot a segment left by a previous boot.
+
+> **`slot_bytes` / `slot_count` are not your slot geometry — do not read them
+> or derive anything from them.** They describe a slot model the manager does
+> **not** use: the manager's arena is this header, then the session table,
+> then bump-allocated per-session bitmap regions — nothing is slot-indexed.
+> The fields are written from `[shm].slot_bytes` in the manager's own config
+> (`4194304` / a computed `64`) and the manager never reads them back. Your
+> `SLOT_SIZE` is `1536`; the header's `4194304` and `64` are unrelated
+> numbers, and treating either as an arena dimension gives you a mapping
+> ~2700× too small. Nothing detects this: the manager doesn't read the
+> fields, and `proto_hash` does not cover the shm header. Get the segment
+> size from `fstat` on the shm fd, or from the `receiver_region_offset` /
+> `total_size` fields once the header change in `ANSWERS_FROM_C_002.md` §1
+> lands — at which point these two fields are removed.
 
 ### Session table — at offset 64
 
