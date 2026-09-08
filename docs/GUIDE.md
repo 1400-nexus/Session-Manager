@@ -841,6 +841,12 @@ durable before reporting `BlockDecoded`.
 **One open question for B:** does the receiver write the shm completion bitmap,
 or is `BlockDecoded` over UDS the only progress path? The cross-check is off and
 quiet either way — keep it if he writes bits, delete it if not.
+[`ANSWERS_FROM_C_002.md`](ANSWERS_FROM_C_002.md) is C's reply — **no** — and
+the shm/proto changes it unblocks: a single `receiver_region_offset` /
+`total_size` boundary in the header (killing the negotiated slot layout,
+`SessionOpen.7`/`.8`, and C's bump allocator), `SessionOpen.file_size` field 9,
+and `PurgeSession.reason` as an enum. None landed — waiting on B's four
+confirmations at the end of that doc.
 
 **Defined but unsent:** `UpdateRate` and `Abort` on the TX side. Both are in the
 schema and neither is dispatched yet.

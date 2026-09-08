@@ -66,6 +66,7 @@ Python is committed there. Regenerate with `libs/nexus-proto/compile.sh`
 | `docs/RECEIVER_CONTRACT.md` | What B's C++ receiver implements against — transport, the `proto_hash` handshake, message flow, the properties that bite, the shm header layout. |
 | `docs/INTEGRATION.md` | The step-by-step integration order, one variable at a time, with the failure diagnosis for each step. |
 | `docs/PURGE_ARC.md` | What a terminal session leaves on disk beyond the `PurgeSession` trigger — the INCOMPLETE quarantine + missing-blocks report, session-id filenames, `_recover`'s refusal of a session with no staged file (+ remedy), the render-time FAILED state. Read before touching `authority.purge` / `_tear_down` / `_recover` or the quarantine adapters. |
+| `docs/ANSWERS_FROM_C_002.md` | C's reply to B (verbatim, not landed): no shm bitmap, `SessionOpen.file_size` field 9, `PurgeSession` triggers. The referent for queued proto + shm-header work — the header's slot fields, `SessionOpen.7`/`.8`, and the bump allocator are all on the chopping block once B confirms. Do not start any of it without re-reading this. |
 | `SHARED_CODE.md` | What was copied from `file-monitor` vs written fresh, and the behaviours where a bug fixed in one must be fixed in both. |
 
 ## Design Principles & Standards
