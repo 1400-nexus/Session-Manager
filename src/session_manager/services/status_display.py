@@ -7,7 +7,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
-from session_manager.domain.ids import ReceiverId
+from session_manager.domain.ids import ReceiverId, SessionId
 from session_manager.domain.models import ReceiverCounters, SessionSnapshot, SessionState
 from session_manager.domain.progress import completion_ratio
 from session_manager.ports.protocols import Clock
@@ -22,10 +22,32 @@ from session_manager.services.constants import (
 logger = structlog.get_logger(__name__)
 
 SnapshotsProvider = Callable[[], Sequence[SessionSnapshot]]
+# `SessionAuthority.is_purged` -- the display's only read into authority state.
+IsPurged = Callable[[SessionId], bool]
 
 _PERCENT = 100.0
 _LOSS_PCT_DIGITS = 2
 _IDLE_SECONDS_DIGITS = 1
+# The two non-terminal aggregator states: a session in one of these that the
+# authority has nonetheless purged is a half-finished purge (see _display_state).
+_LIVE_STATES = (SessionState.OPEN, SessionState.COMPLETE)
+
+
+def _nothing_purged(_session_id: SessionId) -> bool:
+    return False
+
+
+def _display_state(snapshot: SessionSnapshot, is_purged: IsPurged) -> SessionState:
+    # Normally the aggregator's state is the truth. The exception: a session
+    # the authority purged that never got a terminal mark -- the rare
+    # quarantine-report-write failure that leaves purge() half-done and the
+    # sweep skipping the session forever (it's in `_purged`). Without this it
+    # renders as a live OPEN row with a climbing Idle time, i.e. "still
+    # transferring". Show it FAILED instead. Derived here, read-only; the
+    # sweep still does not revisit it and no PurgeSession is re-sent.
+    if snapshot.state in _LIVE_STATES and is_purged(snapshot.spec.session_id):
+        return SessionState.FAILED
+    return snapshot.state
 
 
 def _loss_style(observed_loss_pct: float) -> str:
@@ -48,10 +70,12 @@ def _idle_style(seconds_since_progress: float, stall_timeout_s: float) -> str:
     return ""
 
 
-def _idle_cell(snapshot: SessionSnapshot, stall_timeout_s: float) -> Text:
+def _idle_cell(snapshot: SessionSnapshot, stall_timeout_s: float, state: SessionState) -> Text:
     # Idle time is only meaningful while a session is still running; once it
-    # is COMPLETE or terminal the State column already tells the story.
-    if snapshot.state is not SessionState.OPEN:
+    # is COMPLETE, terminal, or FAILED the State column already tells the
+    # story. `state` is the resolved display state, so a purged-but-OPEN
+    # session (rendered FAILED) gets a blank Idle cell like any dead row.
+    if state is not SessionState.OPEN:
         return Text("")
     seconds = snapshot.seconds_since_progress
     return Text(f"{seconds:.0f}s", style=_idle_style(seconds, stall_timeout_s))
@@ -80,7 +104,9 @@ def _merged_receivers(
     return frozenset(live), counters
 
 
-def _sessions_table(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float) -> Table:
+def _sessions_table(
+    snapshots: Sequence[SessionSnapshot], stall_timeout_s: float, is_purged: IsPurged
+) -> Table:
     table = Table(title="Sessions", expand=True)
     table.add_column("Session")
     table.add_column("State")
@@ -94,6 +120,7 @@ def _sessions_table(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float
         return table
 
     for snapshot in snapshots:
+        state = _display_state(snapshot, is_purged)
         percent_done = _PERCENT * completion_ratio(snapshot.blocks_decoded, snapshot.total_blocks)
         progress = f"{snapshot.blocks_decoded}/{snapshot.total_blocks} ({percent_done:.1f}%)"
         loss = Text(
@@ -102,10 +129,10 @@ def _sessions_table(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float
         missing = str(snapshot.missing_block_count) if snapshot.missing_block_count else ""
         table.add_row(
             str(snapshot.spec.session_id),
-            snapshot.state.name,
+            state.name,
             progress,
             loss,
-            _idle_cell(snapshot, stall_timeout_s),
+            _idle_cell(snapshot, stall_timeout_s, state),
             missing,
         )
 
@@ -174,11 +201,16 @@ def _quarantine_table(snapshots: Sequence[SessionSnapshot]) -> Table | None:
     return table
 
 
-def render(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float) -> RenderableType:
-    """Pure: snapshots (+ the stall timeout, for idle styling) in, a `rich`
-    renderable out. No clock, no state, no I/O."""
+def render(
+    snapshots: Sequence[SessionSnapshot],
+    stall_timeout_s: float,
+    is_purged: IsPurged = _nothing_purged,
+) -> RenderableType:
+    """Pure: snapshots (+ the stall timeout for idle styling, + `is_purged`
+    for the FAILED-row derivation) in, a `rich` renderable out. No clock, no
+    state, no I/O."""
     parts: list[RenderableType] = [
-        _sessions_table(snapshots, stall_timeout_s),
+        _sessions_table(snapshots, stall_timeout_s, is_purged),
         _receivers_table(snapshots),
     ]
     quarantine_table = _quarantine_table(snapshots)
@@ -187,10 +219,10 @@ def render(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float) -> Rend
     return Group(*parts)
 
 
-def _session_fields(snapshot: SessionSnapshot) -> dict[str, Any]:
+def _session_fields(snapshot: SessionSnapshot, is_purged: IsPurged) -> dict[str, Any]:
     return {
         "session_id": str(snapshot.spec.session_id),
-        "state": snapshot.state.name,
+        "state": _display_state(snapshot, is_purged).name,
         "blocks_decoded": snapshot.blocks_decoded,
         "total_blocks": snapshot.total_blocks,
         "observed_loss_pct": round(snapshot.observed_loss_pct, _LOSS_PCT_DIGITS),
@@ -215,7 +247,7 @@ def _receiver_fields(
     }
 
 
-def log_status(snapshots: Sequence[SessionSnapshot]) -> None:
+def log_status(snapshots: Sequence[SessionSnapshot], is_purged: IsPurged = _nothing_purged) -> None:
     """The no-TTY equivalent of `render`: one `status` event, same fields."""
     live, counters = _merged_receivers(snapshots)
     receivers = [
@@ -226,7 +258,7 @@ def log_status(snapshots: Sequence[SessionSnapshot]) -> None:
     ]
     logger.info(
         "status",
-        sessions=[_session_fields(snapshot) for snapshot in snapshots],
+        sessions=[_session_fields(snapshot, is_purged) for snapshot in snapshots],
         receivers=receivers,
     )
 
@@ -249,6 +281,7 @@ class StatusDisplay:
         refresh_interval_s: float,
         snapshots_provider: SnapshotsProvider,
         stall_timeout_s: float,
+        is_purged: IsPurged = _nothing_purged,
         log_interval_s: float = STATUS_LOG_INTERVAL_SECONDS,
     ) -> None:
         self._console: Console = console
@@ -256,6 +289,7 @@ class StatusDisplay:
         self._refresh_interval_s: float = refresh_interval_s
         self._snapshots_provider: SnapshotsProvider = snapshots_provider
         self._stall_timeout_s: float = stall_timeout_s
+        self._is_purged: IsPurged = is_purged
         self._log_interval_s: float = log_interval_s
 
     async def run(self) -> None:
@@ -265,7 +299,7 @@ class StatusDisplay:
             await self._run_logged()
 
     def _render(self) -> RenderableType:
-        return render(self._snapshots_provider(), self._stall_timeout_s)
+        return render(self._snapshots_provider(), self._stall_timeout_s, self._is_purged)
 
     async def _run_live(self) -> None:
         with Live(self._render(), console=self._console, screen=False) as live:
@@ -275,5 +309,5 @@ class StatusDisplay:
 
     async def _run_logged(self) -> None:
         while True:
-            log_status(self._snapshots_provider())
+            log_status(self._snapshots_provider(), self._is_purged)
             await self._clock.sleep(self._log_interval_s)

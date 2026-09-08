@@ -14,6 +14,7 @@ from session_manager.domain.models import (
 )
 from session_manager.services.constants import LOSS_CRITICAL_PCT, LOSS_WARNING_PCT
 from session_manager.services.status_display import (
+    IsPurged,
     StatusDisplay,
     _idle_style,
     _loss_style,
@@ -75,10 +76,15 @@ def _snapshot(
     )
 
 
-def _rendered_text(snapshots: Sequence[SessionSnapshot], *, force_terminal: bool = False) -> str:
+def _rendered_text(
+    snapshots: Sequence[SessionSnapshot],
+    *,
+    force_terminal: bool = False,
+    is_purged: IsPurged = lambda _session_id: False,
+) -> str:
     buffer = io.StringIO()
     console = Console(file=buffer, width=120, force_terminal=force_terminal)
-    console.print(render(snapshots, PURGE_STALL_TIMEOUT_S))
+    console.print(render(snapshots, PURGE_STALL_TIMEOUT_S, is_purged))
     return buffer.getvalue()
 
 
@@ -202,6 +208,44 @@ def test_a_terminal_session_shows_no_idle_time() -> None:
     for state in (SessionState.COMPLETE, SessionState.INCOMPLETE, SessionState.VERIFIED):
         text = _rendered_text([_snapshot(state=state, seconds_since_progress=999.0)])
         assert "999s" not in text
+
+
+def test_a_purged_session_still_open_in_the_aggregator_renders_failed_with_blank_idle() -> None:
+    # The half-finished-purge case: authority.is_purged() is True but the
+    # aggregator never got a terminal mark, so the snapshot is still OPEN.
+    snapshot = _snapshot(
+        session_id="s-dead",
+        state=SessionState.OPEN,
+        blocks_decoded=3,
+        total_blocks=10,
+        seconds_since_progress=871.0,
+    )
+
+    def _is_purged(session_id: SessionId) -> bool:
+        return session_id == SessionId("s-dead")
+
+    text = _rendered_text([snapshot], is_purged=_is_purged)
+
+    assert "FAILED" in text
+    assert "OPEN" not in text
+    assert "871s" not in text  # Idle blanked, like any dead row
+
+    # log_status agrees
+    with capture_logs() as logs:
+        log_status([snapshot], _is_purged)
+    event = next(entry for entry in logs if entry["event"] == "status")
+    assert event["sessions"][0]["state"] == "FAILED"
+
+
+def test_a_purged_session_that_did_reach_a_terminal_mark_keeps_that_state() -> None:
+    # A normal INCOMPLETE purge: purged AND terminal -- must not be relabelled.
+    snapshot = _snapshot(
+        session_id="s-1", state=SessionState.INCOMPLETE, seconds_since_progress=5.0
+    )
+    text = _rendered_text([snapshot], is_purged=lambda _session_id: True)
+
+    assert "INCOMPLETE" in text
+    assert "FAILED" not in text
 
 
 def test_crc_fail_kernel_drops_and_arena_exhausted_are_prominent_when_nonzero() -> None:

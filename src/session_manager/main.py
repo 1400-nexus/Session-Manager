@@ -342,6 +342,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         config.status.refresh_interval_s,
         snapshots_provider=aggregator.snapshots,
         stall_timeout_s=config.purge.stall_timeout_s,
+        is_purged=authority.is_purged,
     )
     supervisor = ProcessSupervisor(_build_receiver_specs(config), spawner, clock)
 

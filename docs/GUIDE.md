@@ -386,7 +386,11 @@ publish only what verified, display status. Its entire authoritative state for a
    block appears below the tables (only when non-empty) listing each
    `HASH_MISMATCH` / `INCOMPLETE` session and the path its file was moved to
    — the actual `quarantine()` return, carried on the frozen snapshot, so
-   "where's the failed transfer's bytes" is answerable from the screen.
+   "where's the failed transfer's bytes" is answerable from the screen. A
+   session the authority purged that never reached a terminal aggregator
+   mark (the half-done purge from a quarantine-report-write failure) renders
+   **FAILED** with a blank Idle cell — derived at render time from
+   `is_purged()`, so it does not read as a still-live `OPEN` row.
 
 ### Adopt-vs-create: the sharpest edge in the system
 
