@@ -66,6 +66,13 @@ stall_timeout_s = 1.5
 # BlockDecoded stream is authoritative on its own.
 shm_crosscheck = false
 
+[purge]
+# Fast so milestone 2's withheld-block session is swept to INCOMPLETE well
+# inside its 10s log-wait; still comfortably longer than the gap between two
+# BlockDecoded reports from an active stub (milestones 1/4).
+sweep_interval_seconds = 0.3
+stall_timeout_seconds = 2.0
+
 [receivers]
 count = 0
 ports = []

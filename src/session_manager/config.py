@@ -26,6 +26,8 @@ from session_manager.constants import (
     DEFAULT_SOCKET_PATH,
     DEFAULT_STAGING_DIR,
     DEFAULT_STALL_TIMEOUT_S,
+    DEFAULT_STALL_TIMEOUT_SECONDS,
+    DEFAULT_SWEEP_INTERVAL_S,
     FORCE_TERMINAL_ENV_VAR,
     FORCE_TERMINAL_KEY,
     JOURNAL_DIR_ENV_VAR,
@@ -40,6 +42,7 @@ from session_manager.constants import (
     PATHS_SECTION,
     POLL_INTERVAL_S_ENV_VAR,
     POLL_INTERVAL_S_KEY,
+    PURGE_SECTION,
     RECEIVER_BINARY_PATH_ENV_VAR,
     RECEIVER_BINARY_PATH_KEY,
     RECEIVER_COUNT_ENV_VAR,
@@ -65,7 +68,11 @@ from session_manager.constants import (
     STAGING_DIR_KEY,
     STALL_TIMEOUT_S_ENV_VAR,
     STALL_TIMEOUT_S_KEY,
+    STALL_TIMEOUT_SECONDS_ENV_VAR,
+    STALL_TIMEOUT_SECONDS_KEY,
     STATUS_SECTION,
+    SWEEP_INTERVAL_SECONDS_ENV_VAR,
+    SWEEP_INTERVAL_SECONDS_KEY,
 )
 from session_manager.supervision.constants import (
     CRASH_LOOP_MAX_RESTARTS,
@@ -106,6 +113,8 @@ ENV_OVERRIDES: tuple[tuple[str, str, str, Callable[[str], Any]], ...] = (
     (RECEIVER_BINARY_PATH_ENV_VAR, RECEIVERS_SECTION, RECEIVER_BINARY_PATH_KEY, str),
     (REFRESH_INTERVAL_S_ENV_VAR, STATUS_SECTION, REFRESH_INTERVAL_S_KEY, float),
     (FORCE_TERMINAL_ENV_VAR, STATUS_SECTION, FORCE_TERMINAL_KEY, _parse_bool),
+    (SWEEP_INTERVAL_SECONDS_ENV_VAR, PURGE_SECTION, SWEEP_INTERVAL_SECONDS_KEY, float),
+    (STALL_TIMEOUT_SECONDS_ENV_VAR, PURGE_SECTION, STALL_TIMEOUT_SECONDS_KEY, float),
 )
 
 
@@ -155,6 +164,15 @@ class StatusConfig:
 
 
 @dataclass(frozen=True)
+class PurgeConfig:
+    # sweep_interval_s <= 0 disables the sweep entirely -- used by unit tests
+    # that drive _sweep_once() directly; validate_config() forbids it for a
+    # real run.
+    sweep_interval_s: float = DEFAULT_SWEEP_INTERVAL_S
+    stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_SECONDS
+
+
+@dataclass(frozen=True)
 class AppConfig:
     paths: PathsConfig
     shm: ShmConfig
@@ -162,6 +180,7 @@ class AppConfig:
     receivers: ReceiversConfig
     supervision: SupervisionConfig
     status: StatusConfig
+    purge: PurgeConfig
 
 
 def _resolve_path(base_dir: Path, value: str) -> Path:
@@ -198,6 +217,7 @@ def load_config(config_path: Path) -> AppConfig:
         AGGREGATION_SECTION: dict(data.get(AGGREGATION_SECTION, {})),
         RECEIVERS_SECTION: dict(data.get(RECEIVERS_SECTION, {})),
         STATUS_SECTION: dict(data.get(STATUS_SECTION, {})),
+        PURGE_SECTION: dict(data.get(PURGE_SECTION, {})),
     }
 
     for env_var_name, section, key, cast_value in ENV_OVERRIDES:
@@ -209,6 +229,7 @@ def load_config(config_path: Path) -> AppConfig:
     aggregation_data = section_data_by_name[AGGREGATION_SECTION]
     receivers_data = section_data_by_name[RECEIVERS_SECTION]
     status_data = section_data_by_name[STATUS_SECTION]
+    purge_data = section_data_by_name[PURGE_SECTION]
 
     app_config = AppConfig(
         paths=PathsConfig(
@@ -259,6 +280,14 @@ def load_config(config_path: Path) -> AppConfig:
                 status_data.get(REFRESH_INTERVAL_S_KEY, DEFAULT_REFRESH_INTERVAL_S)
             ),
             force_terminal=bool(status_data.get(FORCE_TERMINAL_KEY, DEFAULT_FORCE_TERMINAL)),
+        ),
+        purge=PurgeConfig(
+            sweep_interval_s=float(
+                purge_data.get(SWEEP_INTERVAL_SECONDS_KEY, DEFAULT_SWEEP_INTERVAL_S)
+            ),
+            stall_timeout_s=float(
+                purge_data.get(STALL_TIMEOUT_SECONDS_KEY, DEFAULT_STALL_TIMEOUT_SECONDS)
+            ),
         ),
     )
 
@@ -332,4 +361,16 @@ def validate_config(app_config: AppConfig) -> None:
     if app_config.status.refresh_interval_s <= 0:
         raise ValueError(
             f"status.refresh_interval_s must be > 0, got {app_config.status.refresh_interval_s}"
+        )
+
+    purge = app_config.purge
+    if purge.sweep_interval_s <= 0:
+        raise ValueError(f"purge.sweep_interval_seconds must be > 0, got {purge.sweep_interval_s}")
+    if purge.stall_timeout_s <= 0:
+        raise ValueError(f"purge.stall_timeout_seconds must be > 0, got {purge.stall_timeout_s}")
+    if purge.sweep_interval_s >= purge.stall_timeout_s:
+        raise ValueError(
+            f"purge.sweep_interval_seconds ({purge.sweep_interval_s}) must be < "
+            f"purge.stall_timeout_seconds ({purge.stall_timeout_s}) or a stall can "
+            "never be observed"
         )

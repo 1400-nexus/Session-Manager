@@ -14,7 +14,6 @@ from session_manager.domain.models import (
 )
 from session_manager.domain.progress import (
     is_complete,
-    is_stalled,
     missing_blocks,
     observed_loss_pct,
 )
@@ -23,15 +22,18 @@ from session_manager.ports.protocols import Clock, ShmReader
 logger = structlog.get_logger(__name__)
 
 OnComplete = Callable[[SessionSnapshot], Awaitable[None]]
-OnStalled = Callable[[SessionSnapshot], Awaitable[None]]
 LiveReceivers = Callable[[], frozenset[ReceiverId]]
 
 # Once a session reaches one of these, poll() must stop rebuilding its
-# snapshot from is_complete()/is_stalled() -- that logic only ever produces
-# OPEN/COMPLETE/INCOMPLETE, so recomputing after mark_verified/
-# mark_hash_mismatch would silently revert a terminal outcome back to
-# COMPLETE on the very next poll.
-_TERMINAL_STATES = frozenset({SessionState.VERIFIED, SessionState.HASH_MISMATCH})
+# snapshot from is_complete() -- that logic only ever produces OPEN/COMPLETE,
+# so recomputing after a terminal mark (verified / hash_mismatch / the
+# authority's incomplete) would silently revert the outcome to COMPLETE (or
+# OPEN) on the very next poll. INCOMPLETE is set only by mark_incomplete(),
+# from the authority's sweep -- the aggregator no longer detects stalls
+# itself (SessionAuthority.terminal_reason() is the single decision point).
+_TERMINAL_STATES = frozenset(
+    {SessionState.VERIFIED, SessionState.HASH_MISMATCH, SessionState.INCOMPLETE}
+)
 
 
 def _stats_to_counters(stats: Any) -> ReceiverCounters:
@@ -52,6 +54,12 @@ def _stats_to_counters(stats: Any) -> ReceiverCounters:
 class _SessionProgress:
     spec: SessionSpec
     decoded: set[BlockId]
+    # Monotonic time of the last BlockDecoded that grew `decoded` -- or of
+    # registration, if none has. On an adopting restart, registration
+    # happens at the adoption instant, so a recovered session's stall clock
+    # starts fresh for free. The authority's sweep reads this via
+    # `progress_of`; the status display shows how long a session has been
+    # idle relative to it.
     last_progress_at: float
     state: SessionState = SessionState.OPEN
 
@@ -63,6 +71,11 @@ class ProgressAggregator:
     The aggregator holds `ShmReader` only, never `ShmWriter`: it reads the
     bitmap purely as a cross-check and never writes session state. That
     asymmetry is why the two shm ports are split.
+
+    It decides COMPLETE (hand to the verifier) and nothing else. Stall
+    detection is `SessionAuthority`'s: the aggregator reports the decoded
+    count and the last-progress time via `progress_of`, and the authority's
+    sweep is the one place that says what "terminal" means.
     """
 
     def __init__(
@@ -72,17 +85,13 @@ class ProgressAggregator:
         on_complete: OnComplete,
         live_receivers: LiveReceivers,
         poll_interval_s: float,
-        stall_timeout_s: float,
         shm_crosscheck: bool,
-        on_stalled: OnStalled | None = None,
     ) -> None:
         self._clock: Clock = clock
         self._shm_reader: ShmReader = shm_reader
         self._on_complete: OnComplete = on_complete
-        self._on_stalled: OnStalled | None = on_stalled
         self._live_receivers: LiveReceivers = live_receivers
         self._poll_interval_s: float = poll_interval_s
-        self._stall_timeout_s: float = stall_timeout_s
         self._shm_crosscheck: bool = shm_crosscheck
         self._sessions: dict[SessionId, _SessionProgress] = {}
         self._receiver_counters: dict[ReceiverId, ReceiverCounters] = {}
@@ -112,12 +121,15 @@ class ProgressAggregator:
             )
             return
         total_blocks = progress.spec.total_blocks
-        fresh = {BlockId(block_id) for block_id in block_ids if 0 <= block_id < total_blocks}
         before = len(progress.decoded)
-        progress.decoded |= fresh
-        # Only real growth is progress. A receiver re-reporting the same blocks
-        # (or two receivers reporting one block) must not refresh the stall
-        # timer, or duplicate spam keeps a dead session looking alive forever.
+        # Range-filtered and set-unioned: a receiver re-reporting the same
+        # blocks, or two receivers reporting one, counts once.
+        progress.decoded |= {
+            BlockId(block_id) for block_id in block_ids if 0 <= block_id < total_blocks
+        }
+        # Only real growth advances the stall clock -- a receiver re-reporting
+        # its shard (or two receivers overlapping) must not make a dead
+        # session look alive.
         if len(progress.decoded) > before:
             progress.last_progress_at = self._clock.now()
 
@@ -136,6 +148,21 @@ class ProgressAggregator:
             snapshot = self._build_snapshot(session_id, progress, now)
             self._snapshots[session_id] = snapshot
             await self._act_on(progress, snapshot)
+
+    def progress_of(self, session_id: SessionId) -> tuple[int, float, tuple[BlockId, ...]] | None:
+        """`(decoded_count, last_progress_at, missing-blocks preview)` for a
+        tracked session, or `None` if it was never registered.
+        `SessionAuthority`'s sweep reads this: the count and timestamp feed
+        `terminal_reason()`, the preview goes into the `session_stalled` log."""
+        progress = self._sessions.get(session_id)
+        if progress is None:
+            return None
+        missing = missing_blocks(progress.decoded, progress.spec.total_blocks)
+        return (
+            len(progress.decoded),
+            progress.last_progress_at,
+            missing[:MISSING_BLOCKS_PREVIEW_LIMIT],
+        )
 
     def snapshot_for(self, session_id: SessionId) -> SessionSnapshot | None:
         return self._snapshots.get(session_id)
@@ -159,6 +186,15 @@ class ProgressAggregator:
         """Record that `on_complete`'s verify failed and the file was quarantined."""
         self._set_terminal_state(session_id, SessionState.HASH_MISMATCH)
 
+    def mark_incomplete(self, session_id: SessionId) -> None:
+        """Record that `SessionAuthority`'s sweep declared this session stalled.
+
+        Same shape as `mark_verified` / `mark_hash_mismatch`: the aggregator
+        does not decide a stall, it is told -- and then `poll()` stops
+        rebuilding the snapshot so the status display keeps showing INCOMPLETE.
+        """
+        self._set_terminal_state(session_id, SessionState.INCOMPLETE)
+
     def _set_terminal_state(self, session_id: SessionId, state: SessionState) -> None:
         progress = self._sessions.get(session_id)
         if progress is None:
@@ -179,18 +215,6 @@ class ProgressAggregator:
         if snapshot.state is SessionState.COMPLETE:
             progress.state = SessionState.COMPLETE
             await self._on_complete(snapshot)
-        elif snapshot.state is SessionState.INCOMPLETE:
-            progress.state = SessionState.INCOMPLETE
-            logger.warning(
-                "session_stalled",
-                session_id=snapshot.spec.session_id,
-                blocks_decoded=snapshot.blocks_decoded,
-                total_blocks=snapshot.total_blocks,
-                missing_block_count=snapshot.missing_block_count,
-                missing_blocks_preview=[int(block_id) for block_id in snapshot.missing_blocks],
-            )
-            if self._on_stalled is not None:
-                await self._on_stalled(snapshot)
 
     def _build_snapshot(
         self, session_id: SessionId, progress: _SessionProgress, now: float
@@ -198,12 +222,11 @@ class ProgressAggregator:
         spec = progress.spec
         decoded_count = len(progress.decoded)
 
-        if is_complete(progress.decoded, spec.total_blocks):
-            state = SessionState.COMPLETE
-        elif is_stalled(progress.last_progress_at, now, self._stall_timeout_s):
-            state = SessionState.INCOMPLETE
-        else:
-            state = SessionState.OPEN
+        state = (
+            SessionState.COMPLETE
+            if is_complete(progress.decoded, spec.total_blocks)
+            else SessionState.OPEN
+        )
 
         missing_full = missing_blocks(progress.decoded, spec.total_blocks)
 
@@ -223,6 +246,7 @@ class ProgressAggregator:
             live_receivers=self._live_receivers(),
             missing_blocks=missing_full[:MISSING_BLOCKS_PREVIEW_LIMIT],
             missing_block_count=len(missing_full),
+            seconds_since_progress=max(0.0, now - progress.last_progress_at),
         )
 
     def _cross_check(self, session_id: SessionId, uds_count: int) -> None:

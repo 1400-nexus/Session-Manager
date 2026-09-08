@@ -81,6 +81,7 @@ def _snapshot(**overrides: object) -> SessionSnapshot:
         "live_receivers": frozenset({ReceiverId(0), ReceiverId(1)}),
         "missing_blocks": (BlockId(2), BlockId(3)),
         "missing_block_count": 2,
+        "seconds_since_progress": 0.0,
     }
     base.update(overrides)
     return SessionSnapshot(**base)  # type: ignore[arg-type]

@@ -154,6 +154,15 @@ class Journal(Protocol):
 
     def sync(self) -> None: ...
 
+    def purge(self, session_id: SessionId) -> None:
+        """Discard a session's journal for good -- called once it is terminal.
+
+        A restart must not replay a session that has already been published,
+        quarantined or declared incomplete. Idempotent: purging a session
+        that was never journaled, or twice, must not raise.
+        """
+        ...
+
 
 class SessionSpecStore(Protocol):
     """Durable `SessionSpec` storage, keyed by session id.

@@ -33,6 +33,19 @@ count = 0
 ports = [9100, 9101, 9102]
 binary_path = "./bin/nexus-receiver"
 
+[purge]
+# The SessionAuthority sweeps every open session on this interval and emits a
+# PurgeSession for any that turned terminal (verified, hash_mismatch, or --
+# the case only a timer catches -- a session that simply went silent).
+sweep_interval_seconds = 5.0
+# Wall-clock gap with no BlockDecoded after which an unfinished session is
+# declared INCOMPLETE and purged. PLACEHOLDER: 60s is deliberately too-long
+# rather than too-short. The defensible number needs A's sender pacing
+# (rate_limit_bps + the stripe schedule) -- under heavy loss a tail block can
+# sit at k-1 symbols for a long time while other blocks keep completing, and
+# this must exceed that worst-case gap, not the gap between two packets.
+stall_timeout_seconds = 60.0
+
 [status]
 refresh_interval_s = 0.5
 # false (default) = auto-detect a terminal, which is correct under compose

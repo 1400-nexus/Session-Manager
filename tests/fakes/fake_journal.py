@@ -15,6 +15,7 @@ class FakeJournal:
     def __init__(self) -> None:
         self._records: dict[SessionId, list[BlockId]] = {}
         self.sync_count: int = 0
+        self.purged: list[SessionId] = []
         self._pending_replay_error: Exception | None = None
         self._pending_append_error: Exception | None = None
 
@@ -44,3 +45,7 @@ class FakeJournal:
 
     def sync(self) -> None:
         self.sync_count += 1
+
+    def purge(self, session_id: SessionId) -> None:
+        self._records.pop(session_id, None)
+        self.purged.append(session_id)

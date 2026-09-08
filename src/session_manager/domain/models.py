@@ -106,6 +106,11 @@ class SessionSnapshot:
     live_receivers: frozenset[ReceiverId]
     missing_blocks: tuple[BlockId, ...]
     missing_block_count: int
+    # Seconds since the last BlockDecoded that grew this session's decoded
+    # set (or since it was opened, if none has). The status display styles
+    # its idle column off this; the authority's stall decision keys off the
+    # underlying timestamp, not this derived value.
+    seconds_since_progress: float
 
     def counters_for(self, receiver_id: ReceiverId) -> ReceiverCounters | None:
         for candidate_id, counters in self.per_receiver:

@@ -37,32 +37,25 @@ class _Rig:
     clock: FakeClock
     shm: FakeShm
     completed: list[SessionSnapshot] = field(default_factory=list)
-    stalled: list[SessionSnapshot] = field(default_factory=list)
 
 
-def _rig(*, shm_crosscheck: bool = True, stall_timeout_s: float = 8.0) -> _Rig:
+def _rig(*, shm_crosscheck: bool = True) -> _Rig:
     clock = FakeClock()
     shm = FakeShm()
     completed: list[SessionSnapshot] = []
-    stalled: list[SessionSnapshot] = []
 
     async def on_complete(snapshot: SessionSnapshot) -> None:
         completed.append(snapshot)
-
-    async def on_stalled(snapshot: SessionSnapshot) -> None:
-        stalled.append(snapshot)
 
     aggregator = ProgressAggregator(
         clock=clock,
         shm_reader=shm,
         on_complete=on_complete,
-        on_stalled=on_stalled,
         live_receivers=lambda: frozenset({R0, R1}),
         poll_interval_s=1.0,
-        stall_timeout_s=stall_timeout_s,
         shm_crosscheck=shm_crosscheck,
     )
-    return _Rig(aggregator, clock, shm, completed, stalled)
+    return _Rig(aggregator, clock, shm, completed)
 
 
 def _init_shm_session(shm: FakeShm, spec: SessionSpec) -> None:
@@ -70,24 +63,25 @@ def _init_shm_session(shm: FakeShm, spec: SessionSpec) -> None:
     shm.init_session(spec, block_table_offset=64, bitmap_offset=256)
 
 
-async def test_duplicate_block_decoded_is_idempotent_and_does_not_refresh_the_stall_timer() -> None:
-    rig = _rig(shm_crosscheck=False, stall_timeout_s=8.0)
+async def test_duplicate_block_decoded_is_idempotent_and_does_not_advance_the_stall_clock() -> None:
+    rig = _rig(shm_crosscheck=False)
     spec = _spec(total_blocks=5)
-    rig.aggregator.register_session(spec)
+    rig.aggregator.register_session(spec)  # last_progress_at = 0.0
 
-    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1])
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1])  # real growth -> stamps
     rig.clock.advance(5.0)
-    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1])
-    rig.aggregator.handle_block_decoded(R1, spec.session_id, [1])
-    rig.clock.advance(4.0)
-
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 1])  # duplicate -> no stamp
+    rig.aggregator.handle_block_decoded(R1, spec.session_id, [1])  # overlap -> no stamp
     await rig.aggregator.poll()
 
+    count, last_progress_at, missing = rig.aggregator.progress_of(spec.session_id) or (0, -1.0, ())
+    assert count == 2  # deduped
+    assert missing == (BlockId(2), BlockId(3), BlockId(4))
+    assert last_progress_at == 0.0  # the real growth at t=0, not the t=5 duplicates
     snapshot = rig.aggregator.snapshot_for(spec.session_id)
     assert snapshot is not None
     assert snapshot.blocks_decoded == 2
-    # last progress was at t=0; a refreshed timer at t=5 would leave 4s < 8s.
-    assert snapshot.state is SessionState.INCOMPLETE
+    assert snapshot.state is SessionState.OPEN
 
 
 async def test_a_block_reported_by_two_receivers_counts_once() -> None:
@@ -108,7 +102,6 @@ async def test_out_of_range_block_ids_are_not_counted_as_progress() -> None:
     rig = _rig(shm_crosscheck=False)
     spec = _spec(total_blocks=3)
     rig.aggregator.register_session(spec)
-    rig.clock.advance(10.0)
 
     rig.aggregator.handle_block_decoded(R0, spec.session_id, [5, 99])
     await rig.aggregator.poll()
@@ -116,40 +109,67 @@ async def test_out_of_range_block_ids_are_not_counted_as_progress() -> None:
     snapshot = rig.aggregator.snapshot_for(spec.session_id)
     assert snapshot is not None
     assert snapshot.blocks_decoded == 0
-    assert snapshot.state is SessionState.INCOMPLETE
+    assert snapshot.state is SessionState.OPEN
 
 
-async def test_a_stalled_session_reports_incomplete_with_the_missing_blocks() -> None:
-    rig = _rig(shm_crosscheck=False, stall_timeout_s=8.0)
+async def test_progress_of_reports_count_last_progress_time_and_a_capped_preview() -> None:
+    rig = _rig(shm_crosscheck=False)
+    spec = _spec(total_blocks=5)
+    rig.clock.advance(3.0)
+    rig.aggregator.register_session(spec)  # last_progress_at = 3.0
+    rig.clock.advance(4.0)
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 2])  # growth -> 7.0
+
+    assert rig.aggregator.progress_of(spec.session_id) == (
+        2,
+        7.0,
+        (BlockId(1), BlockId(3), BlockId(4)),
+    )
+
+
+async def test_a_recovered_session_last_progress_is_the_registration_instant_not_zero() -> None:
+    # The adopt-safety mechanism: register_session runs during the authority's
+    # _recover(), so the recovered session's stall clock starts fresh. A naive
+    # last_progress_at (0.0, or restored from before the restart) would have
+    # the authority's sweep purge every live transfer immediately.
+    rig = _rig(shm_crosscheck=False)
+    spec = _spec(total_blocks=5)
+    rig.clock.advance(10_000.0)  # a long-running manager, or a monotonic clock
+
+    rig.aggregator.register_session(spec, decoded=[BlockId(0), BlockId(1)])
+
+    result = rig.aggregator.progress_of(spec.session_id)
+    assert result is not None
+    _count, last_progress_at, _missing = result
+    assert last_progress_at == 10_000.0
+
+
+async def test_progress_of_an_unregistered_session_is_none() -> None:
+    rig = _rig(shm_crosscheck=False)
+
+    assert rig.aggregator.progress_of(SessionId("ghost")) is None
+
+
+async def test_mark_incomplete_freezes_the_snapshot_at_incomplete() -> None:
+    rig = _rig(shm_crosscheck=False)
     spec = _spec(total_blocks=5)
     rig.aggregator.register_session(spec)
     rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 2])
-    rig.clock.advance(9.0)
+    await rig.aggregator.poll()
 
-    with capture_logs() as logs:
-        await rig.aggregator.poll()
+    rig.aggregator.mark_incomplete(spec.session_id)
 
     snapshot = rig.aggregator.snapshot_for(spec.session_id)
     assert snapshot is not None
     assert snapshot.state is SessionState.INCOMPLETE
-    assert snapshot.missing_blocks == (BlockId(1), BlockId(3), BlockId(4))
-    assert snapshot.missing_block_count == 3
+
+    rig.aggregator.handle_block_decoded(R0, spec.session_id, [1, 3, 4])
+    await rig.aggregator.poll()  # a terminal session is not rebuilt
+
+    snapshot_after = rig.aggregator.snapshot_for(spec.session_id)
+    assert snapshot_after is not None
+    assert snapshot_after.state is SessionState.INCOMPLETE
     assert rig.completed == []
-    stalled = [entry for entry in logs if entry["event"] == "session_stalled"]
-    assert stalled and stalled[0]["missing_blocks_preview"] == [1, 3, 4]
-
-
-async def test_on_stalled_fires_exactly_once_per_session() -> None:
-    rig = _rig(shm_crosscheck=False, stall_timeout_s=8.0)
-    spec = _spec(total_blocks=5)
-    rig.aggregator.register_session(spec)
-    rig.aggregator.handle_block_decoded(R0, spec.session_id, [0, 2])
-    rig.clock.advance(9.0)
-
-    await rig.aggregator.poll()
-    await rig.aggregator.poll()  # still stalled -- must not fire again
-
-    assert [snapshot.spec.session_id for snapshot in rig.stalled] == [spec.session_id]
 
 
 async def test_a_complete_session_is_handed_to_the_verifier_exactly_once() -> None:

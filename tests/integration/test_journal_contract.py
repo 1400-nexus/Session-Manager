@@ -81,3 +81,23 @@ def test_sync_does_not_raise_with_nothing_pending(harness: Harness) -> None:
     journal = harness.make()
 
     journal.sync()
+
+
+async def test_purge_drops_a_session_and_replay_then_yields_nothing(harness: Harness) -> None:
+    journal = harness.make()
+    journal.append(SESSION_A, BlockId(0), 0, 100)
+    journal.append(SESSION_B, BlockId(5), 500, 100)
+
+    journal.purge(SESSION_A)
+
+    assert [block_id async for block_id in journal.replay(SESSION_A)] == []
+    assert [block_id async for block_id in journal.replay(SESSION_B)] == [BlockId(5)]
+
+
+def test_purge_is_idempotent_and_safe_for_an_unknown_session(harness: Harness) -> None:
+    journal = harness.make()
+
+    journal.purge(SessionId("never-seen"))  # must not raise
+    journal.append(SESSION_A, BlockId(0), 0, 100)
+    journal.purge(SESSION_A)
+    journal.purge(SESSION_A)  # twice

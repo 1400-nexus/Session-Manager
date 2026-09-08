@@ -122,6 +122,15 @@ class AppendJournal:
         for session_id, handle in self._handles.items():
             self._sync_one(session_id, handle)
 
+    def purge(self, session_id: SessionId) -> None:
+        handle = self._handles.pop(session_id, None)
+        if handle is not None:
+            handle.close()
+        self._pending_since_sync.pop(session_id, None)
+        # missing_ok: a session whose appends were all still buffered (never
+        # flushed to a file) is a real case, and purge must not raise.
+        self._path_for(session_id).unlink(missing_ok=True)
+
     def _handle_for(self, session_id: SessionId) -> BinaryIO:
         handle = self._handles.get(session_id)
         if handle is None:

@@ -1,3 +1,4 @@
+import asyncio
 import math
 from collections.abc import Awaitable, Callable, Collection
 from typing import Any
@@ -8,8 +9,14 @@ import structlog
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 from session_manager.domain.models import OpenSession, SessionSpec
 from session_manager.domain.paths import is_unsafe_relpath
+from session_manager.domain.purge_policy import (
+    PurgeReason,
+    SessionProgress,
+    terminal_reason,
+)
 from session_manager.ipc import codec
 from session_manager.ports.protocols import (
+    Clock,
     FileLock,
     FileStore,
     Journal,
@@ -27,6 +34,26 @@ SendToReceiver = Callable[[ReceiverId, bytes], Awaitable[None]]
 # session). Wiring registration here rather than at each call site is what
 # stops a new creation path from silently skipping progress tracking.
 OnSessionOpened = Callable[[SessionSpec, Collection[BlockId]], None]
+# `(decoded_count, last_progress_at, missing-blocks preview)` for a tracked
+# session, or None if it was never registered with progress tracking (a lost
+# spec sidecar). `last_progress_at` is the aggregator's monotonic stamp of
+# the last decoded-set growth -- set at registration, which on an adopting
+# restart is the adoption instant, so a recovered session gets fresh grace
+# without the authority tracking anything itself.
+DecodedProgress = Callable[[SessionId], tuple[int, float, tuple[BlockId, ...]] | None]
+# Told the aggregator a session's terminal outcome so the status display
+# stops rebuilding its snapshot -- same shape as mark_verified / _hash_mismatch.
+MarkTerminal = Callable[[SessionId], None]
+
+# PurgeReason -> the wire string PurgeSession.reason has always carried.
+# rx.proto keeps `reason` a free-text string (see RECEIVER_CONTRACT.md s4),
+# so the enum stays an internal vocabulary and this table is the one place
+# the mapping is stated.
+_PURGE_REASON_WIRE: dict[PurgeReason, str] = {
+    PurgeReason.PUBLISHED: "verified",
+    PurgeReason.QUARANTINED: "hash_mismatch",
+    PurgeReason.INCOMPLETE: "incomplete",
+}
 
 
 def _bitmap_bytes(total_blocks: int) -> int:
@@ -89,11 +116,16 @@ class SessionAuthority:
         broadcast: Broadcast,
         send_to_receiver: SendToReceiver,
         on_session_opened: OnSessionOpened,
+        clock: Clock,
+        progress_of: DecodedProgress,
+        on_incomplete: MarkTerminal,
         shm_name: str,
         staging_dir: str,
         journal_dir: str,
         arena_bytes: int,
         session_region_base: int,
+        sweep_interval_s: float,
+        stall_timeout_s: float,
     ) -> None:
         self._file_lock: FileLock = file_lock
         self._shm: ShmWriter = shm
@@ -103,15 +135,30 @@ class SessionAuthority:
         self._broadcast: Broadcast = broadcast
         self._send_to_receiver: SendToReceiver = send_to_receiver
         self._on_session_opened: OnSessionOpened = on_session_opened
+        self._clock: Clock = clock
+        self._progress_of: DecodedProgress = progress_of
+        self._on_incomplete: MarkTerminal = on_incomplete
         self._shm_name: str = shm_name
         self._staging_dir: str = staging_dir
         self._journal_dir: str = journal_dir
         self._arena_bytes: int = arena_bytes
         self._next_offset: int = session_region_base
+        self._sweep_interval_s: float = sweep_interval_s
+        self._stall_timeout_s: float = stall_timeout_s
         self._known: dict[SessionId, OpenSession] = {}
         self._specs: dict[SessionId, SessionSpec] = {}
         self._recovered_ids: set[SessionId] = set()
+        self._purged: set[SessionId] = set()
+        # session_id -> the first sweep `now` at which progress_of() came back
+        # None for it. A session in _specs that the aggregator does not know
+        # is a wiring bug (this service has shipped that class before): it can
+        # never complete, never stall, and would leak its staging file and
+        # session-table slot forever. Instead it is logged loudly and purged
+        # INCOMPLETE once a stall_timeout has passed since it was noticed.
+        self._untracked_since: dict[SessionId, float] = {}
         self._adopted: bool = False
+        self._stop_event: asyncio.Event = asyncio.Event()
+        self._sweep_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         # flock before ANYTHING touches shm: two managers on one segment is
@@ -120,10 +167,40 @@ class SessionAuthority:
         self._adopted = self._shm.create_or_adopt(self._shm_name, self._arena_bytes)
         if self._adopted:
             await self._recover()
+        # Only reached on the success path -- if acquire() raised, there is no
+        # task and stop() is a no-op. sweep_interval_s <= 0 disables the loop:
+        # unit tests drive _sweep_once() directly and never want a live task.
+        if self._sweep_interval_s > 0:
+            self._sweep_task = asyncio.create_task(self._run_sweep())
+
+    async def stop(self) -> None:
+        """Stop the sweep loop. Idempotent; safe if start() never ran."""
+        self._stop_event.set()
+        task = self._sweep_task
+        if task is None:
+            return
+        self._sweep_task = None
+        # cancel as well as signalling: a tick blocked inside _broadcast()
+        # (a wedged receiver) will not observe _stop_event on its own. The
+        # cancel is awaited from this non-cancelled context -- not the
+        # task.cancel()-from-inside-a-cancelling-task shape that deadlocked
+        # shutdown before.
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def handle_manifest_seen(self, receiver_id: ReceiverId, manifest_seen: Any) -> None:
         manifest = manifest_seen.manifest
         session_id = SessionId(manifest.session_id)
+        if session_id in self._purged:
+            # The session is over -- we broadcast PurgeSession and tore down
+            # its shm entry, sidecar and journal. A resent ManifestSeen must
+            # not resurrect it (that would re-init_session and re-broadcast a
+            # SessionOpen for something B was told is finished).
+            logger.debug("manifest_seen_for_purged_session", session_id=session_id)
+            return
         if session_id in self._known:
             # A duplicate is still information this receiver needs: its
             # ManifestSeen may have arrived after another receiver's won the
@@ -194,11 +271,204 @@ class SessionAuthority:
         # not FEC corruption, and the composition root logs it differently.
         return session_id in self._recovered_ids
 
+    def is_purged(self, session_id: SessionId) -> bool:
+        return session_id in self._purged
+
+    def classify_completion(self, session_id: SessionId, *, hash_ok: bool) -> PurgeReason:
+        """The publish-vs-quarantine decision for a session the aggregator
+        just reported COMPLETE, routed through `terminal_reason()` so there is
+        one module that says what terminal means.
+
+        The session is complete by construction here, so the policy reduces
+        to the hash verdict -- but a 0-block session (an empty file) cannot be
+        expressed as a `SessionProgress` (that dataclass rejects
+        total_blocks <= 0), so that degenerate case is decided directly.
+        """
+        spec = self._specs.get(session_id)
+        if spec is None or spec.total_blocks <= 0:
+            return PurgeReason.PUBLISHED if hash_ok else PurgeReason.QUARANTINED
+        # A complete session: is_stalled() short-circuits False, so the
+        # timestamps here are irrelevant and terminal_reason reduces to the
+        # verdict. Going through it keeps the vocabulary in one module.
+        progress = SessionProgress(
+            total_blocks=spec.total_blocks,
+            decoded_blocks=spec.total_blocks,
+            opened_at=0.0,
+            last_block_at=0.0,
+        )
+        reason = terminal_reason(
+            progress,
+            now=0.0,
+            hash_ok=hash_ok,
+            stall_timeout=self._stall_timeout_s,
+        )
+        if reason is None:
+            # Unreachable today: is_complete(progress) holds (decoded == total),
+            # so the policy returns PUBLISHED/QUARANTINED for any non-None
+            # hash_ok. Kept so a future policy change cannot silently drop a
+            # completed session on the floor.
+            return PurgeReason.PUBLISHED if hash_ok else PurgeReason.QUARANTINED
+        return reason
+
+    async def purge(self, session_id: SessionId, reason: PurgeReason) -> None:
+        """Announce a session's terminal state to every receiver, once.
+
+        The single `PurgeSession` emission point -- the sweep and the
+        completion path both funnel through here, and a session already
+        purged is never re-announced.
+        """
+        if session_id in self._purged:
+            return
+        self._purged.add(session_id)
+        wire_reason = _PURGE_REASON_WIRE[reason]
+        await self._broadcast(
+            codec.encode(rx_pb2.PurgeSession(session_id=str(session_id), reason=wire_reason))
+        )
+        self._tear_down(session_id)
+        logger.info("session_purged", session_id=session_id, reason=wire_reason)
+
+    def _tear_down(self, session_id: SessionId) -> None:
+        # Remove the session's durable footprint so an adopting restart does
+        # not re-recover a session B was told is finished and re-broadcast a
+        # SessionOpen for it. `_purged` is in-memory only; these three are
+        # what actually survive a crash. Best-effort: a failure here leaves a
+        # stale artifact, not a wrong announcement (`_purged` still guards
+        # this process; the artifact only matters on a later adopt).
+        #
+        # ORDER IS LOAD-BEARING. shm first: the on-segment session table is
+        # what _recover() iterates, so once it is gone nothing downstream can
+        # be re-adopted and the sidecar/journal order stops mattering. But if
+        # shm.purge_session() fails (the except below), a mid-teardown crash
+        # leaves the session in the table -- and then SIDECAR MUST GO BEFORE
+        # JOURNAL:
+        #  - sidecar deleted, then crash: _recover() replays the (still full)
+        #    journal but spec_store.load() -> None -> session_spec_missing_on_
+        #    recovery, `continue`. No SessionOpen re-broadcast. Recoverable.
+        #  - journal purged, then crash: _recover() replays an empty journal,
+        #    loads the (still present) spec, and re-registers the session with
+        #    zero decoded blocks -- re-broadcasting a SessionOpen for a
+        #    transfer B already tore down. Worse.
+        # Do not reorder.
+        try:
+            self._shm.purge_session(session_id)
+        except (KeyError, RuntimeError) as error:
+            logger.error("shm_purge_session_failed", session_id=session_id, error=str(error))
+        self._spec_store.delete(session_id)  # sidecar -- before the journal
+        self._journal.purge(session_id)
+        self._known.pop(session_id, None)
+        self._specs.pop(session_id, None)
+        self._untracked_since.pop(session_id, None)
+
     def shutdown(self, clean: bool = True) -> None:
         self._shm.close(unlink=clean)
         self._file_lock.release()
 
+    async def _run_sweep(self) -> None:
+        while not self._stop_event.is_set():
+            await self._interruptible_sleep(self._sweep_interval_s)
+            if self._stop_event.is_set():
+                return
+            await self._sweep_once()
+
+    async def _interruptible_sleep(self, delay: float) -> None:
+        # Mirrors ProcessSupervisor._wait_for_backoff_or_stop: race the sleep
+        # against the stop signal so shutdown never waits out a full interval.
+        sleep_task = asyncio.ensure_future(asyncio.sleep(delay))
+        stop_task = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            await asyncio.wait({sleep_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (sleep_task, stop_task):
+                task.cancel()
+            await asyncio.gather(sleep_task, stop_task, return_exceptions=True)
+
+    async def _sweep_once(self) -> None:
+        now = self._clock.now()
+        for session_id in list(self._specs):
+            if session_id in self._purged:
+                continue
+            try:
+                await self._evaluate(session_id, now)
+            except Exception as error:
+                # One session's bad evaluation must not kill the sweep or
+                # skip the sessions after it in this tick.
+                logger.error(
+                    "session_sweep_evaluation_failed", session_id=session_id, error=str(error)
+                )
+
+    async def _evaluate(self, session_id: SessionId, now: float) -> None:
+        spec = self._specs.get(session_id)
+        if spec is None or spec.total_blocks <= 0:
+            return
+        tracked = self._progress_of(session_id)
+        if tracked is None:
+            await self._handle_untracked(session_id, spec, now)
+            return
+        self._untracked_since.pop(session_id, None)  # it recovered
+        decoded_count, last_progress_at, missing_preview = tracked
+
+        # `last_progress_at` is the aggregator's stamp of the last decoded-set
+        # growth -- or, for a recovered session, the adoption instant, because
+        # register_session runs during _recover(). So a restart gives every
+        # live transfer a full fresh stall_timeout without the authority
+        # tracking anything itself.
+        progress = SessionProgress(
+            total_blocks=spec.total_blocks,
+            decoded_blocks=decoded_count,
+            opened_at=last_progress_at,
+            last_block_at=last_progress_at,
+        )
+        reason = terminal_reason(
+            progress, now=now, hash_ok=None, stall_timeout=self._stall_timeout_s
+        )
+        if reason is not PurgeReason.INCOMPLETE:
+            # None -> still live. PUBLISHED/QUARANTINED never come back here
+            # (hash_ok is None), and even if they did the completion path
+            # owns publish/quarantine -- not the sweep.
+            return
+
+        logger.warning(
+            "session_stalled",
+            session_id=session_id,
+            blocks_decoded=decoded_count,
+            total_blocks=spec.total_blocks,
+            missing_block_count=spec.total_blocks - decoded_count,
+            missing_blocks_preview=[int(block_id) for block_id in missing_preview],
+        )
+        self._on_incomplete(session_id)
+        await self.purge(session_id, PurgeReason.INCOMPLETE)
+
+    async def _handle_untracked(self, session_id: SessionId, spec: SessionSpec, now: float) -> None:
+        # The session is in _specs but progress_of() is None -- the aggregator
+        # never registered it. That is a wiring bug, not a normal state, so it
+        # is loud; and it is self-limiting so the leak is bounded: after a
+        # stall_timeout it is purged INCOMPLETE, freeing the staging file and
+        # the shm slot. The bytes on disk are worthless anyway (it can never
+        # be verified without the aggregator).
+        first_seen = self._untracked_since.get(session_id)
+        if first_seen is None:
+            self._untracked_since[session_id] = now
+            logger.error(
+                "session_untracked_by_aggregator",
+                session_id=session_id,
+                total_blocks=spec.total_blocks,
+                hint="in the authority's _specs but progress_of() is None -- a "
+                "wiring bug; will be purged INCOMPLETE after the stall timeout",
+            )
+            return
+        if now - first_seen < self._stall_timeout_s:
+            return
+        logger.error("purging_untracked_session", session_id=session_id)
+        self._on_incomplete(session_id)
+        await self.purge(session_id, PurgeReason.INCOMPLETE)
+
     async def _recover(self) -> None:
+        # Each recovered session's stall clock starts now, at the adoption
+        # instant: `_on_session_opened` -> `aggregator.register_session`
+        # stamps `last_progress_at` with the current time, and the sweep
+        # keys off that. The journal has no timestamp for when its blocks
+        # actually arrived, and running from the original open time would
+        # purge every live transfer on the first post-restart sweep.
         for open_session in self._shm.open_sessions():
             self._known[open_session.session_id] = open_session
             region_end = open_session.bitmap_offset + _bitmap_bytes(open_session.total_blocks)

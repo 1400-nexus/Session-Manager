@@ -344,7 +344,24 @@ publish only what verified, display status. Its entire authoritative state for a
 5. Manager **journals each block, then** folds it into the completion set.
 6. Complete → `verifier` hashes → pass: atomic rename into output; fail:
    quarantine, log both digests, **never delete**.
-7. Terminal state → `PurgeSession` so receivers release slots.
+7. Terminal state → `PurgeSession` so receivers release slots. `SessionAuthority`
+   is the sole emitter, via one function: `domain/purge_policy.terminal_reason()`
+   maps `(progress, hash verdict, stall timeout)` → `PUBLISHED` / `QUARANTINED`
+   / `INCOMPLETE` / still-live (no defaulted timeout — config is the only
+   source). The completion path calls it after verifying; a 5-second **sweep**
+   in the authority calls it for every open session, which is the only thing
+   that catches the session that just went *silent* — `INCOMPLETE` is the
+   absence of `BlockDecoded`, so nothing event-driven ever fires it. A session
+   is announced exactly once, and purge then **tears down its durable footprint**
+   — shm session-table entry, spec sidecar, journal file — so an adopting
+   restart cannot re-recover it and re-broadcast `SessionOpen` for something
+   the receivers were told is finished. A late `BlockDecoded` after purge is
+   dropped at debug; a resent `ManifestSeen` is ignored. On adopt, a recovered
+   session's stall clock starts at the adoption instant (the aggregator stamps
+   `last_progress_at` when `_recover` registers it), not its original open
+   time — otherwise a restart purges every live transfer on the first sweep.
+   The status display's **Idle** column shows time-since-last-block, styled
+   yellow past half the stall timeout and red past 90%.
 
 ### Adopt-vs-create: the sharpest edge in the system
 
@@ -634,9 +651,11 @@ the schema implies them:
 | `shm.name` | `nexus-rx` | receivers learn it from `Config` |
 | `shm.arena_bytes` | 268,435,456 | 256 MiB → compose needs `shm_size: 512m` |
 | `shm.slot_bytes` | 4,194,304 | 4 MiB → 64 slots; `MIN_ARENA_SLOTS = 4` |
-| `aggregation.poll_interval_s` | 1.0 | must be < `stall_timeout_s` |
-| `aggregation.stall_timeout_s` | 8.0 | |
+| `aggregation.poll_interval_s` | 1.0 | how often `BlockDecoded` folds are turned into snapshots / COMPLETE |
+| `aggregation.stall_timeout_s` | 8.0 | **vestigial** — stall detection moved to `[purge]`; still loaded and validated, read by nothing |
 | `aggregation.shm_crosscheck` | **false** | off until a receiver writes the bitmap. **`DEFAULT_SHM_CROSSCHECK` in code is `True`** — the value if the key is absent |
+| `purge.sweep_interval_seconds` | 5.0 | `SessionAuthority` sweeps open sessions this often for a terminal state |
+| `purge.stall_timeout_seconds` | 60.0 | no `BlockDecoded` for this long → `INCOMPLETE` + `PurgeSession`; also drives the status display's Idle column styling. **Placeholder** pending A's sender pacing |
 | `receivers.count` | 0 | 0 = supervise nothing |
 | `status.refresh_interval_s` | 0.5 | Live tables only; the no-TTY path logs every 5 s |
 | `status.force_terminal` | false | **false = auto-detect**, not "off" — see the bug log |

@@ -25,6 +25,7 @@ SHM_SECTION = "shm"
 AGGREGATION_SECTION = "aggregation"
 RECEIVERS_SECTION = "receivers"
 STATUS_SECTION = "status"
+PURGE_SECTION = "purge"
 
 STAGING_DIR_KEY = "staging_dir"
 OUTPUT_DIR_KEY = "output_dir"
@@ -48,6 +49,9 @@ RECEIVER_BINARY_PATH_KEY = "binary_path"
 REFRESH_INTERVAL_S_KEY = "refresh_interval_s"
 FORCE_TERMINAL_KEY = "force_terminal"
 
+SWEEP_INTERVAL_SECONDS_KEY = "sweep_interval_seconds"
+STALL_TIMEOUT_SECONDS_KEY = "stall_timeout_seconds"
+
 STAGING_DIR_ENV_VAR = "NEXUS_STAGING_DIR"
 OUTPUT_DIR_ENV_VAR = "NEXUS_OUTPUT_DIR"
 JOURNAL_DIR_ENV_VAR = "NEXUS_JOURNAL_DIR"
@@ -70,6 +74,9 @@ RECEIVER_BINARY_PATH_ENV_VAR = "NEXUS_RECEIVERS_BINARY_PATH"
 REFRESH_INTERVAL_S_ENV_VAR = "NEXUS_STATUS_REFRESH_INTERVAL_S"
 FORCE_TERMINAL_ENV_VAR = "NEXUS_STATUS_FORCE_TERMINAL"
 
+SWEEP_INTERVAL_SECONDS_ENV_VAR = "NEXUS_PURGE_SWEEP_INTERVAL_SECONDS"
+STALL_TIMEOUT_SECONDS_ENV_VAR = "NEXUS_PURGE_STALL_TIMEOUT_SECONDS"
+
 DEFAULT_STAGING_DIR = "./staging"
 DEFAULT_OUTPUT_DIR = "./output"
 DEFAULT_JOURNAL_DIR = "./journal"
@@ -91,5 +98,14 @@ DEFAULT_RECEIVER_BINARY_PATH = "./bin/nexus-receiver"
 
 DEFAULT_REFRESH_INTERVAL_S = 0.5
 DEFAULT_FORCE_TERMINAL = False
+
+# How often SessionAuthority sweeps open sessions for a terminal state.
+DEFAULT_SWEEP_INTERVAL_S = 5.0
+# The value `purge.stall_timeout_seconds` takes when the [purge] section is
+# absent -- the only place the 60s number lives now (domain/purge_policy has
+# no default; config is the source of truth). A placeholder pending A's
+# sender pacing numbers (rate_limit_bps + the stripe schedule), which set
+# the real worst-case gap between decodable blocks under a degraded router.
+DEFAULT_STALL_TIMEOUT_SECONDS = 60.0
 
 RECEIVER_PORTS_ENV_SEPARATOR = ","

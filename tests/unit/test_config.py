@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from session_manager import config
+from session_manager.constants import DEFAULT_STALL_TIMEOUT_SECONDS, DEFAULT_SWEEP_INTERVAL_S
 
 
 def _toml_value(value: object) -> str:
@@ -34,6 +35,7 @@ def _valid_sections() -> dict[str, dict[str, object]]:
         },
         "receivers": {"count": 0, "ports": [9100, 9101, 9102], "binary_path": "bin/rx"},
         "status": {"refresh_interval_s": 0.5, "force_terminal": False},
+        "purge": {"sweep_interval_seconds": 5.0, "stall_timeout_seconds": 60.0},
     }
 
 
@@ -184,6 +186,29 @@ def test_poll_interval_must_be_shorter_than_the_stall_timeout(tmp_path: Path) ->
     sections["aggregation"]["stall_timeout_s"] = 8.0
 
     with pytest.raises(ValueError, match="poll_interval_s"):
+        config.load_config(_write_config(tmp_path, sections))
+
+
+def test_purge_defaults_apply_when_the_section_is_absent(tmp_path: Path) -> None:
+    sections = _valid_sections()
+    del sections["purge"]
+    app_config = config.load_config(_write_config(tmp_path, sections))
+    assert app_config.purge.sweep_interval_s == DEFAULT_SWEEP_INTERVAL_S
+    assert app_config.purge.stall_timeout_s == DEFAULT_STALL_TIMEOUT_SECONDS
+
+
+def test_sweep_interval_must_be_shorter_than_the_purge_stall_timeout(tmp_path: Path) -> None:
+    sections = _valid_sections()
+    sections["purge"]["sweep_interval_seconds"] = 30.0
+    sections["purge"]["stall_timeout_seconds"] = 30.0
+    with pytest.raises(ValueError, match="purge.sweep_interval_seconds"):
+        config.load_config(_write_config(tmp_path, sections))
+
+
+def test_purge_stall_timeout_must_be_positive(tmp_path: Path) -> None:
+    sections = _valid_sections()
+    sections["purge"]["stall_timeout_seconds"] = 0.0
+    with pytest.raises(ValueError, match="purge.stall_timeout_seconds"):
         config.load_config(_write_config(tmp_path, sections))
 
 

@@ -15,6 +15,7 @@ from session_manager.config import (  # noqa: E402
     AggregationConfig,
     AppConfig,
     PathsConfig,
+    PurgeConfig,
     ReceiversConfig,
     ShmConfig,
     StatusConfig,
@@ -44,6 +45,7 @@ def _config(tmp_path: Path) -> AppConfig:
         receivers=ReceiversConfig(count=0, ports=(), binary_path=""),
         supervision=SupervisionConfig(),
         status=StatusConfig(refresh_interval_s=0.05, force_terminal=False),
+        purge=PurgeConfig(sweep_interval_s=0.05, stall_timeout_s=1.0),
     )
 
 

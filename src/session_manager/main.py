@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import rx_pb2
 import structlog
 from rich.console import Console
 
@@ -32,6 +31,7 @@ from session_manager.constants import (
 )
 from session_manager.domain.blocks import block_byte_range
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
+from session_manager.domain.purge_policy import PurgeReason
 from session_manager.ipc import codec, handshake
 from session_manager.ipc.constants import (
     BLOCK_DECODED_FIELD_NAME,
@@ -113,6 +113,12 @@ async def _handle_block_decoded(
 ) -> None:
     await context.ready.wait()
     session_id = SessionId(message.session_id)
+    if context.authority.is_purged(session_id):
+        # An expected in-flight race, not an error: the sweep or the
+        # completion path purged this session and a receiver's last few
+        # BlockDecoded are still on the wire. Drop them without journaling.
+        logger.debug("block_decoded_after_purge", session_id=session_id, receiver_id=receiver_id)
+        return
     spec = context.aggregator.spec_for(session_id)
     if spec is not None:
         for raw_block_id in message.block_ids:
@@ -259,19 +265,14 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
     verifier = IntegrityVerifier(hasher, file_store)
     publisher = Publisher(file_store)
 
-    async def purge(session_id: SessionId, reason: str) -> None:
-        # Tell every receiver a session is finished so it can free the slot it
-        # was writing into, rather than holding it until its next restart.
-        message = rx_pb2.PurgeSession(session_id=str(session_id), reason=reason)
-        await broadcast(codec.encode(message))
-
     async def on_complete(snapshot: Any) -> None:
         session_id = snapshot.spec.session_id
         try:
-            if await verifier.verify(snapshot.spec):
+            hash_ok = await verifier.verify(snapshot.spec)
+            reason = authority.classify_completion(session_id, hash_ok=hash_ok)
+            if reason is PurgeReason.PUBLISHED:
                 publisher.publish(snapshot.spec)
                 aggregator.mark_verified(session_id)
-                await purge(session_id, "verified")
             else:
                 if authority.was_recovered(session_id):
                     # A mismatch right after an adopt is a recovery hole -- a
@@ -281,16 +282,13 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
                     logger.error("recovered_session_failed_verification", session_id=session_id)
                 publisher.quarantine(snapshot.spec)
                 aggregator.mark_hash_mismatch(session_id)
-                await purge(session_id, "hash_mismatch")
+            await authority.purge(session_id, reason)
         except Exception as error:
             # on_complete runs inside ProgressAggregator.poll(), inside the
             # TaskGroup -- an unhandled exception here would propagate out
             # of poll(), fail that task, and cancel every sibling task. One
             # bad session must not take down the process.
             logger.error("session_completion_failed", session_id=session_id, error=str(error))
-
-    async def on_stalled(snapshot: Any) -> None:
-        await purge(snapshot.spec.session_id, "incomplete")
 
     # `aggregator` does not exist yet when `on_complete` is defined above --
     # that's fine, `on_complete`'s body isn't executed until a session
@@ -302,10 +300,8 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         clock=clock,
         shm_reader=shm,
         on_complete=on_complete,
-        on_stalled=on_stalled,
         live_receivers=registry.active_receivers,
         poll_interval_s=config.aggregation.poll_interval_s,
-        stall_timeout_s=config.aggregation.stall_timeout_s,
         shm_crosscheck=config.aggregation.shm_crosscheck,
     )
 
@@ -322,11 +318,16 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         broadcast=broadcast,
         send_to_receiver=send_to_receiver,
         on_session_opened=aggregator.register_session,
+        clock=clock,
+        progress_of=aggregator.progress_of,
+        on_incomplete=aggregator.mark_incomplete,
         shm_name=config.shm.name,
         staging_dir=str(config.paths.staging_dir),
         journal_dir=str(config.paths.journal_dir),
         arena_bytes=config.shm.arena_bytes,
         session_region_base=session_region_base,
+        sweep_interval_s=config.purge.sweep_interval_s,
+        stall_timeout_s=config.purge.stall_timeout_s,
     )
     # force_terminal=False would pin is_terminal OFF even on a real PTY, so
     # `rich` never live-renders and StatusDisplay's `while True` prints
@@ -339,6 +340,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         clock,
         config.status.refresh_interval_s,
         snapshots_provider=aggregator.snapshots,
+        stall_timeout_s=config.purge.stall_timeout_s,
     )
     supervisor = ProcessSupervisor(_build_receiver_specs(config), spawner, clock)
 
@@ -426,6 +428,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         clean_shutdown = False
 
     await supervisor.shutdown()
+    await authority.stop()  # stop the sweep loop before tearing down further
     journal.sync()
     config.paths.socket_path.unlink(missing_ok=True)
     # authority.shutdown() closes shm (unlink only if this was a clean exit,

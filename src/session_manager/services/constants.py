@@ -3,6 +3,12 @@
 LOSS_WARNING_PCT = 5.0
 LOSS_CRITICAL_PCT = 15.0
 
+# Fraction of purge.stall_timeout_seconds a session must have been idle (no
+# BlockDecoded growth) for the status display's Idle column to warn (yellow)
+# / alarm (bold red). The authority purges it INCOMPLETE at 1.0.
+IDLE_WARNING_FRACTION = 0.5
+IDLE_CRITICAL_FRACTION = 0.9
+
 # How often the status display emits a `status` log line when there is no
 # TTY to draw live tables on. Deliberately far slower than the live refresh:
 # one greppable line every few seconds, not a full redraw twice a second

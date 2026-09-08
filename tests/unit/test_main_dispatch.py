@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 from session_manager.adapters.system_clock import SystemClock
 from session_manager.domain.ids import BlockId, ReceiverId, SessionId
 from session_manager.domain.models import SessionSpec
+from session_manager.domain.purge_policy import PurgeReason
 from session_manager.ipc import codec
 from session_manager.main import (
     DispatchContext,
@@ -79,7 +80,6 @@ def _context(
         on_complete=on_complete,
         live_receivers=registry.active_receivers,
         poll_interval_s=1.0,
-        stall_timeout_s=8.0,
         shm_crosscheck=False,
     )
 
@@ -95,11 +95,16 @@ def _context(
         broadcast=lambda payload: asyncio.sleep(0),
         send_to_receiver=send_to_receiver,
         on_session_opened=aggregator.register_session,
+        clock=clock,
+        progress_of=aggregator.progress_of,
+        on_incomplete=aggregator.mark_incomplete,
         shm_name="seg",
         staging_dir="/staging",
         journal_dir="/journal",
         arena_bytes=ARENA_BYTES,
         session_region_base=REGION_BASE,
+        sweep_interval_s=0.0,  # tests here don't exercise the sweep
+        stall_timeout_s=60.0,
     )
     if ready is None:
         # Pre-set by default: most of these tests call handlers directly and
@@ -287,6 +292,22 @@ async def test_block_decoded_for_an_unknown_session_does_not_touch_the_journal()
     assert [block_id async for block_id in journal.replay(SessionId("ghost"))] == []
 
 
+async def test_block_decoded_after_purge_is_dropped_at_debug_without_journaling() -> None:
+    context, _clock, _shm, _aggregator, journal = _context()
+    await context.authority.start()
+    await _handle_manifest_seen(context, ReceiverId(1), _manifest_seen())
+    await context.authority.purge(SESSION, PurgeReason.INCOMPLETE)
+
+    message = rx_pb2.BlockDecoded(session_id=str(SESSION), receiver_id=1, block_ids=[0, 1])
+    with capture_logs() as logs:
+        await _handle_block_decoded(context, ReceiverId(1), message)
+
+    assert [block_id async for block_id in journal.replay(SESSION)] == []  # not journaled
+    dropped = [entry for entry in logs if entry["event"] == "block_decoded_after_purge"]
+    assert dropped and dropped[0]["log_level"] == "debug"
+    assert not any(entry["event"] == "block_decoded_for_unknown_session" for entry in logs)
+
+
 async def test_dispatch_loop_routes_receiver_hello_to_the_registry() -> None:
     context, _clock, _shm, _aggregator, _journal = _context()
     ipc = FakeIpcServer()
@@ -356,6 +377,7 @@ def test_build_receiver_specs_one_per_configured_receiver() -> None:
         AggregationConfig,
         AppConfig,
         PathsConfig,
+        PurgeConfig,
         ReceiversConfig,
         ShmConfig,
         StatusConfig,
@@ -378,6 +400,7 @@ def test_build_receiver_specs_one_per_configured_receiver() -> None:
         receivers=ReceiversConfig(count=2, ports=(9100, 9101, 9102), binary_path="./bin/rx"),
         supervision=SupervisionConfig(),
         status=StatusConfig(refresh_interval_s=0.5, force_terminal=False),
+        purge=PurgeConfig(),
     )
 
     specs = _build_receiver_specs(config)

@@ -8,10 +8,12 @@ from rich.table import Table
 from rich.text import Text
 
 from session_manager.domain.ids import ReceiverId
-from session_manager.domain.models import ReceiverCounters, SessionSnapshot
+from session_manager.domain.models import ReceiverCounters, SessionSnapshot, SessionState
 from session_manager.domain.progress import completion_ratio
 from session_manager.ports.protocols import Clock
 from session_manager.services.constants import (
+    IDLE_CRITICAL_FRACTION,
+    IDLE_WARNING_FRACTION,
     LOSS_CRITICAL_PCT,
     LOSS_WARNING_PCT,
     STATUS_LOG_INTERVAL_SECONDS,
@@ -23,6 +25,7 @@ SnapshotsProvider = Callable[[], Sequence[SessionSnapshot]]
 
 _PERCENT = 100.0
 _LOSS_PCT_DIGITS = 2
+_IDLE_SECONDS_DIGITS = 1
 
 
 def _loss_style(observed_loss_pct: float) -> str:
@@ -31,6 +34,27 @@ def _loss_style(observed_loss_pct: float) -> str:
     if observed_loss_pct >= LOSS_WARNING_PCT:
         return "bold yellow"
     return "bold green"
+
+
+def _idle_style(seconds_since_progress: float, stall_timeout_s: float) -> str:
+    # Styled relative to the purge stall timeout: this is the graded warning
+    # that a session is going quiet -- it used to be the aggregator flipping
+    # the State column to INCOMPLETE early; now the authority only marks
+    # INCOMPLETE at the timeout, so the live view needs its own signal.
+    if seconds_since_progress >= IDLE_CRITICAL_FRACTION * stall_timeout_s:
+        return "bold red"
+    if seconds_since_progress >= IDLE_WARNING_FRACTION * stall_timeout_s:
+        return "yellow"
+    return ""
+
+
+def _idle_cell(snapshot: SessionSnapshot, stall_timeout_s: float) -> Text:
+    # Idle time is only meaningful while a session is still running; once it
+    # is COMPLETE or terminal the State column already tells the story.
+    if snapshot.state is not SessionState.OPEN:
+        return Text("")
+    seconds = snapshot.seconds_since_progress
+    return Text(f"{seconds:.0f}s", style=_idle_style(seconds, stall_timeout_s))
 
 
 def _prominent_if_nonzero(value: int) -> Text:
@@ -56,16 +80,17 @@ def _merged_receivers(
     return frozenset(live), counters
 
 
-def _sessions_table(snapshots: Sequence[SessionSnapshot]) -> Table:
+def _sessions_table(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float) -> Table:
     table = Table(title="Sessions", expand=True)
     table.add_column("Session")
     table.add_column("State")
     table.add_column("Progress", justify="right")
     table.add_column("Loss %", justify="right")
+    table.add_column("Idle", justify="right")
     table.add_column("Missing", justify="right")
 
     if not snapshots:
-        table.add_row("(no active sessions)", "", "", "", "")
+        table.add_row("(no active sessions)", "", "", "", "", "")
         return table
 
     for snapshot in snapshots:
@@ -75,7 +100,14 @@ def _sessions_table(snapshots: Sequence[SessionSnapshot]) -> Table:
             f"{snapshot.observed_loss_pct:.2f}%", style=_loss_style(snapshot.observed_loss_pct)
         )
         missing = str(snapshot.missing_block_count) if snapshot.missing_block_count else ""
-        table.add_row(str(snapshot.spec.session_id), snapshot.state.name, progress, loss, missing)
+        table.add_row(
+            str(snapshot.spec.session_id),
+            snapshot.state.name,
+            progress,
+            loss,
+            _idle_cell(snapshot, stall_timeout_s),
+            missing,
+        )
 
     return table
 
@@ -121,9 +153,10 @@ def _receivers_table(snapshots: Sequence[SessionSnapshot]) -> Table:
     return table
 
 
-def render(snapshots: Sequence[SessionSnapshot]) -> RenderableType:
-    """Pure: snapshots in, a `rich` renderable out. No clock, no state, no I/O."""
-    return Group(_sessions_table(snapshots), _receivers_table(snapshots))
+def render(snapshots: Sequence[SessionSnapshot], stall_timeout_s: float) -> RenderableType:
+    """Pure: snapshots (+ the stall timeout, for idle styling) in, a `rich`
+    renderable out. No clock, no state, no I/O."""
+    return Group(_sessions_table(snapshots, stall_timeout_s), _receivers_table(snapshots))
 
 
 def _session_fields(snapshot: SessionSnapshot) -> dict[str, Any]:
@@ -133,6 +166,7 @@ def _session_fields(snapshot: SessionSnapshot) -> dict[str, Any]:
         "blocks_decoded": snapshot.blocks_decoded,
         "total_blocks": snapshot.total_blocks,
         "observed_loss_pct": round(snapshot.observed_loss_pct, _LOSS_PCT_DIGITS),
+        "seconds_since_last_block": round(snapshot.seconds_since_progress, _IDLE_SECONDS_DIGITS),
         "missing_block_count": snapshot.missing_block_count,
     }
 
@@ -185,12 +219,14 @@ class StatusDisplay:
         clock: Clock,
         refresh_interval_s: float,
         snapshots_provider: SnapshotsProvider,
+        stall_timeout_s: float,
         log_interval_s: float = STATUS_LOG_INTERVAL_SECONDS,
     ) -> None:
         self._console: Console = console
         self._clock: Clock = clock
         self._refresh_interval_s: float = refresh_interval_s
         self._snapshots_provider: SnapshotsProvider = snapshots_provider
+        self._stall_timeout_s: float = stall_timeout_s
         self._log_interval_s: float = log_interval_s
 
     async def run(self) -> None:
@@ -199,11 +235,14 @@ class StatusDisplay:
         else:
             await self._run_logged()
 
+    def _render(self) -> RenderableType:
+        return render(self._snapshots_provider(), self._stall_timeout_s)
+
     async def _run_live(self) -> None:
-        with Live(render(self._snapshots_provider()), console=self._console, screen=False) as live:
+        with Live(self._render(), console=self._console, screen=False) as live:
             while True:
                 await self._clock.sleep(self._refresh_interval_s)
-                live.update(render(self._snapshots_provider()))
+                live.update(self._render())
 
     async def _run_logged(self) -> None:
         while True:
