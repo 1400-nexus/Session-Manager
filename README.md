@@ -69,9 +69,10 @@ exercises five scenarios:
 
 1. three receivers, all blocks → `VERIFIED`, published file hash matches source
 2. one receiver withholds blocks → stall timeout → `INCOMPLETE`, output empty,
-   the partial moved to `quarantine/` with a `.incomplete.json` missing-blocks report
+   the partial moved to `quarantine/` (as `<name>.<session_id>.bin`) with a
+   `<that>.incomplete.json` missing-blocks report
 3. one receiver corrupts a block's bytes → `HASH_MISMATCH`, staged file
-   quarantined, output empty
+   quarantined (as `<name>.<session_id>.bin`), output empty
 4. `kill -9` the manager mid-transfer → restart **adopts** the segment, recovers
    the spec from the sidecar and blocks from the journal, session still verifies
 5. a receiver with the wrong `proto_hash` → refused, the other receivers

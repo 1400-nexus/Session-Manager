@@ -41,8 +41,8 @@ def test_quarantine_delegates_and_never_touches_published() -> None:
 
     quarantined_path = publisher.quarantine(_spec())
 
-    assert quarantined_path == Path("/store/quarantine/sub/file.bin")
-    assert store.quarantined == ["sub/file.bin"]
+    assert quarantined_path == Path("/store/quarantine/sub/file.s-1.bin")
+    assert store.quarantined == ["sub/file.s-1.bin"]
     assert store.published == []
     assert "sub/file.bin" not in store.staged
 

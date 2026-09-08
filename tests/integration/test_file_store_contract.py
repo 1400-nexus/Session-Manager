@@ -21,6 +21,8 @@ REPORT = IncompleteReport(
     missing_block_ids=(BlockId(1), BlockId(4)),
 )
 INCOMPLETE_NAME = quarantine_name(RELPATH, REPORT.session_id)
+MISMATCH_SESSION = SessionId("m1sm4tch")
+MISMATCH_NAME = quarantine_name(RELPATH, MISMATCH_SESSION)
 
 
 class Harness(Protocol):
@@ -122,16 +124,16 @@ def test_publish_moves_staged_to_published(harness: Harness) -> None:
 
     assert harness.is_published(RELPATH)
     assert not harness.is_staged(RELPATH)
-    assert not harness.is_quarantined(RELPATH)
+    assert not harness.is_quarantined(MISMATCH_NAME)
 
 
 def test_quarantine_moves_staged_to_quarantined_never_to_published(harness: Harness) -> None:
     store = harness.make()
     store.allocate(RELPATH, ALLOCATE_SIZE)
 
-    store.quarantine(RELPATH)
+    store.quarantine(RELPATH, MISMATCH_SESSION)
 
-    assert harness.is_quarantined(RELPATH)
+    assert harness.is_quarantined(MISMATCH_NAME)  # session id before the extension
     assert not harness.is_staged(RELPATH)
     assert not harness.is_published(RELPATH)
 
@@ -143,7 +145,7 @@ def test_staged_file_exists_tracks_allocate_then_the_move_out(harness: Harness) 
     store.allocate(RELPATH, ALLOCATE_SIZE)
     assert store.staged_file_exists(RELPATH) is True
 
-    store.quarantine(RELPATH)
+    store.quarantine(RELPATH, MISMATCH_SESSION)
     assert store.staged_file_exists(RELPATH) is False
 
 

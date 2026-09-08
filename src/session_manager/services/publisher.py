@@ -33,7 +33,7 @@ class Publisher:
 
     def quarantine(self, spec: SessionSpec) -> Path:
         self._reject_unsafe(spec.relpath)
-        quarantined_path = self._file_store.quarantine(spec.relpath)
+        quarantined_path = self._file_store.quarantine(spec.relpath, spec.session_id)
         logger.error("session_quarantined", session_id=spec.session_id, path=str(quarantined_path))
         return quarantined_path
 

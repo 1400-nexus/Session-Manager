@@ -343,7 +343,15 @@ publish only what verified, display status. Its entire authoritative state for a
    `BlockDecoded`.
 5. Manager **journals each block, then** folds it into the completion set.
 6. Complete → `verifier` hashes → pass: atomic rename into output; fail:
-   quarantine, log both digests, **never delete**.
+   quarantine, log both digests, **never delete**. A quarantined file keeps
+   its name with the session id spliced in before the extension —
+   `report.bin` becomes `report.a3f9c1d2e4b50678.bin` (16 hex chars,
+   `secrets.token_hex(8)`, one per transfer). That is deliberate, not a bug:
+   `os.replace` silently overwrites, so without the id a second bad transfer
+   of `report.bin` — a re-drop after a mismatch, two stalls of the same
+   file — would destroy the first one's evidence. The id makes every
+   quarantined artifact unique and ties it back to its `session_id` in the
+   logs. Same rule for the INCOMPLETE partials in step 7.
 7. Terminal state → `PurgeSession` so receivers release slots. `SessionAuthority`
    is the sole emitter, via one function: `domain/purge_policy.terminal_reason()`
    maps `(progress, hash verdict, stall timeout)` → `PUBLISHED` / `QUARANTINED`
@@ -353,13 +361,13 @@ publish only what verified, display status. Its entire authoritative state for a
    that catches the session that just went *silent* — `INCOMPLETE` is the
    absence of `BlockDecoded`, so nothing event-driven ever fires it. A session
    is announced exactly once. On `INCOMPLETE`, purge first moves the partial
-   into `quarantine/` (`Publisher.quarantine_incomplete`), named
-   `<stem>.<session_id><ext>` so two stalled transfers of one filename in a
-   run don't clobber each other, with a `<that name>.incomplete.json` beside
-   it — `{session_id, total_blocks, decoded_blocks, missing_block_ids}`, the
-   full missing list read from the journal — because a partially-received
-   file is evidence of what the link delivered, same as a hash mismatch, not
-   scratch to reap. That report is written (atomically) *before* purge
+   into `quarantine/` (`Publisher.quarantine_incomplete`) under the same
+   `report.<session_id>.bin` name as step 6, with a
+   `report.<session_id>.bin.incomplete.json` beside it —
+   `{session_id, total_blocks, decoded_blocks, missing_block_ids}`, the full
+   missing list read from the journal — because a partially-received file is
+   evidence of what the link delivered, same as a hash mismatch, not scratch
+   to reap. That report is written (atomically) *before* purge
    **tears down the durable footprint** — shm session-table entry, spec
    sidecar, journal file — so an adopting restart cannot re-recover it and
    re-broadcast `SessionOpen` for something the receivers were told is

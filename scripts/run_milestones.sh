@@ -345,7 +345,9 @@ milestone_3() {
         echo "FAIL: output directory not empty after milestone 3"
         ok=1
     fi
-    if [ ! -f "$STAGING_DIR/quarantine/stub-m3.bin" ]; then
+    # Quarantined under the session id (before the extension) so two
+    # mismatches of one filename in a run can't overwrite each other.
+    if [ ! -f "$STAGING_DIR/quarantine/stub-m3.m3.bin" ]; then
         echo "FAIL: quarantined file missing for milestone 3"
         ok=1
     fi

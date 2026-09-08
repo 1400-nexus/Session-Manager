@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import secrets
 from pathlib import Path
 
 import pytest
@@ -103,11 +105,25 @@ def test_quarantine_preserves_content_and_never_reaches_output(tmp_path: Path) -
     staged = store.allocate("output.bin", 5)
     staged.write_bytes(b"junk!")
 
-    quarantined = store.quarantine("output.bin")
+    quarantined = store.quarantine("output.bin", SessionId("aaaa1111"))
 
+    assert quarantined == tmp_path / "staging" / "quarantine" / "output.aaaa1111.bin"
     assert quarantined.read_bytes() == b"junk!"
     assert not staged.exists()
     assert not (tmp_path / "output" / "output.bin").exists()
+
+
+def test_two_hash_mismatches_of_one_relpath_keep_both_quarantined_files(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    store.allocate("dir/f.bin", 3).write_bytes(b"aaa")
+    first = store.quarantine("dir/f.bin", SessionId("11112222"))
+    store.allocate("dir/f.bin", 3).write_bytes(b"bbb")
+    second = store.quarantine("dir/f.bin", SessionId("33334444"))
+
+    assert first != second
+    assert first.read_bytes() == b"aaa"
+    assert second.read_bytes() == b"bbb"
 
 
 def test_quarantine_incomplete_keeps_the_partial_byte_identical_and_writes_the_report(
@@ -190,3 +206,29 @@ def test_two_incomplete_transfers_of_one_relpath_keep_both_partials_and_reports(
     second = json.loads((quarantine_dir / "report.bbbb2222.bin.incomplete.json").read_text())
     assert first["missing_block_ids"] == [1, 2]
     assert second["missing_block_ids"] == [2]
+
+
+def test_quarantine_names_use_a_real_session_token_not_just_the_milestone_form(
+    tmp_path: Path,
+) -> None:
+    # The milestone harness uses "m3" as the session id; production is
+    # secrets.token_hex(8). Exercise the real shape: 16 hex chars spliced in
+    # before the extension, report sitting right next to the partial.
+    store = _store(tmp_path)
+    session_token = SessionId(secrets.token_hex(8))
+
+    store.allocate("out/data.bin", 4).write_bytes(b"junk")
+    mismatch = store.quarantine("out/data.bin", session_token)
+    assert re.fullmatch(rf"data\.{session_token}\.bin", mismatch.name)
+    assert mismatch.read_bytes() == b"junk"
+
+    store.allocate("out/data.bin", 4).write_bytes(b"part")
+    report = IncompleteReport(
+        session_token,
+        total_blocks=4,
+        decoded_blocks=1,
+        missing_block_ids=(BlockId(1), BlockId(2), BlockId(3)),
+    )
+    partial = store.quarantine_incomplete("out/data.bin", report)
+    assert partial.name == f"data.{session_token}.bin"
+    assert partial.with_name(f"{partial.name}.incomplete.json").is_file()

@@ -252,6 +252,11 @@ Sent when a session reaches a terminal state. Release the shm slot / file
 handles you held for `session_id`; do not expect more traffic for it. A
 `PurgeSession` for a session you don't know is a no-op.
 
+On `hash_mismatch` or `incomplete` the manager moves the staged file out of
+`dest_path` into a quarantine area (renamed with the session id, to keep it
+as evidence) — so `dest_path` must not be touched after its `PurgeSession`.
+You never see the quarantine path; it is not part of this contract.
+
 ### Note on `receiver_id` inside message bodies
 
 The manager identifies you by the `receiver_id` in your `ReceiverHello` and the

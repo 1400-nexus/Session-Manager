@@ -8,6 +8,7 @@ from session_manager.adapters.constants import (
     STAGED_FILE_MODE,
 )
 from session_manager.adapters.quarantine_paths import quarantine_name
+from session_manager.domain.ids import SessionId
 from session_manager.domain.models import IncompleteReport
 
 
@@ -62,18 +63,15 @@ class LocalFileStore:
     def staged_file_exists(self, relpath: str) -> bool:
         return self.staged_path(relpath).is_file()
 
-    def quarantine(self, relpath: str) -> Path:
+    def quarantine(self, relpath: str, session_id: SessionId) -> Path:
         staged = self.staged_path(relpath)
-        quarantined = self._quarantine_dir / relpath
+        quarantined = self._quarantine_dir / quarantine_name(relpath, session_id)
         quarantined.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staged, quarantined)
         return quarantined
 
     def quarantine_incomplete(self, relpath: str, report: IncompleteReport) -> Path:
-        staged = self.staged_path(relpath)
-        quarantined = self._quarantine_dir / quarantine_name(relpath, report.session_id)
-        quarantined.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staged, quarantined)
+        quarantined = self.quarantine(relpath, report.session_id)
         # Report name derived from the move's target, never recomputed from
         # relpath -- two INCOMPLETE transfers of one filename must not share
         # (or clobber) a report.
