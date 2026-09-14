@@ -10,7 +10,7 @@ services:
     # authority.start(), plus the shutdown tail (supervisor.shutdown,
     # journal.sync, authority.shutdown).
     stop_grace_period: 30s
-    # The completion arena is 256 MB (config.toml shm.arena_bytes) and the
+    # The completion segment is 320 MB (config.toml shm.segment_bytes) and the
     # container's default /dev/shm is 64 MB, so create_or_adopt would fail at
     # startup without this.
     shm_size: 512m

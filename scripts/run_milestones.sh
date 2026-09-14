@@ -55,8 +55,7 @@ lock_path = "$LOCK_PATH"
 
 [shm]
 name = "$SHM_NAME"
-arena_bytes = 1048576
-slot_bytes = 4096
+segment_bytes = 1048576
 
 [aggregation]
 poll_interval_s = 0.2

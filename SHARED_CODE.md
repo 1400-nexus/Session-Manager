@@ -4,28 +4,28 @@ Code in this repo that was **copied from `file-monitor`** rather than written
 here. When `file-monitor` fixes a bug in one of these, it has to be carried
 across by hand — there is no shared package. Keep this table honest.
 
-## Cross-repo state, as of `nexus-proto@7f406db`
+## Cross-repo state, as of `nexus-proto@7f757c5`
 
 | repo | `nexus-proto` pin | state |
 |---|---|---|
-| `session-manager` | `7f406db` | this repo. |
-| `file-monitor` | `7f406db` | realigned. |
-| `sender` (Person A) | `60bd06e` | **five commits behind.** Its `SenderHello.proto_hash` will not match `file-monitor`'s — **the connection is refused**, not subtly wrong. Also missing `AssignSession.source_path` and the `Manifest.sender_id` shard-residue comment. Must bump before any integration. |
-| `receiver` (Person B) | — | one commit, a README. No code yet. |
+| `session-manager` | `7f757c5` | this repo. |
+| `file-monitor` | `7f757c5` | realigned. |
+| `sender` (Person A) | `7f757c5` | realigned. Its `SenderHello.proto_hash` must match `file-monitor`'s — **a mismatch is a refused connection**, not subtle wrongness. |
+| `receiver` (Person B) | `7f757c5` | realigned. Implements `SessionOpen.file_size` and the `PurgeReason` enum from this commit. |
 
 `proto_hash` is BLAKE3 over the raw bytes of every `*.proto` file, so it moves
 with any edit — a comment included — and it has moved several times. The
-digest at `7f406db` is
-`38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df`, recorded
+digest at `7f757c5` is
+`5b1483b951ae1a4affbed914dd2fb60e696871c7e1140e944c41c324d1b4e6ec`, recorded
 in `docs/INTEGRATION.md` step 1, `docs/RECEIVER_CONTRACT.md` §2, and
 `file-monitor/docs/SENDER_CONTRACT.md` §2. Check the pin with
 `git submodule status`.
 
-The RX contract has not changed structurally since `cef65a6` (the `rx.proto`
-edits since — `dest_path` absolute, `SessionOpen` idempotent, `BlockDecoded`
-durable-before-report — are all comments). `ipc.proto` gained
-`AssignSession.source_path` at `7f406db` for the sender; nothing in it changed
-for the RX side.
+The RX contract changed structurally at this commit (`SessionOpen.file_size`
+added as field 9, `SessionOpen.7`/`.8` deprecated, `PurgeSession.reason`
+retyped from `string` to the `PurgeReason` enum). `ipc.proto` is unchanged
+since `AssignSession.source_path` at `7f406db`; `common.proto` and `net.proto`
+are unchanged.
 
 **Line-ending trap:** `proto_hash` is over raw bytes, so a CRLF checkout of
 the `.proto` files hashes differently at the same pin — `git submodule status`

@@ -1,10 +1,6 @@
 MIN_PORT = 1
 MAX_PORT = 65535
 
-# The completion arena must hold at least this many slots or three receivers
-# cannot pipeline stripes without stalling on slot reuse.
-MIN_ARENA_SLOTS = 4
-
 CONFIG_ERROR_EXIT_CODE = 78  # sysexits.h EX_CONFIG
 
 NEXUS_CONFIG_ENV_VAR = "NEXUS_CONFIG"
@@ -35,8 +31,7 @@ SOCKET_PATH_KEY = "socket_path"
 LOCK_PATH_KEY = "lock_path"
 
 SHM_NAME_KEY = "name"
-ARENA_BYTES_KEY = "arena_bytes"
-SLOT_BYTES_KEY = "slot_bytes"
+SEGMENT_BYTES_KEY = "segment_bytes"
 
 POLL_INTERVAL_S_KEY = "poll_interval_s"
 SHM_CROSSCHECK_KEY = "shm_crosscheck"
@@ -59,8 +54,7 @@ SOCKET_PATH_ENV_VAR = "NEXUS_SOCKET_PATH"
 LOCK_PATH_ENV_VAR = "NEXUS_LOCK_PATH"
 
 SHM_NAME_ENV_VAR = "NEXUS_SHM_NAME"
-ARENA_BYTES_ENV_VAR = "NEXUS_SHM_ARENA_BYTES"
-SLOT_BYTES_ENV_VAR = "NEXUS_SHM_SLOT_BYTES"
+SEGMENT_BYTES_ENV_VAR = "NEXUS_SHM_SEGMENT_BYTES"
 
 POLL_INTERVAL_S_ENV_VAR = "NEXUS_AGGREGATION_POLL_INTERVAL_S"
 SHM_CROSSCHECK_ENV_VAR = "NEXUS_AGGREGATION_SHM_CROSSCHECK"
@@ -83,8 +77,10 @@ DEFAULT_SOCKET_PATH = "./run/session-manager.sock"
 DEFAULT_LOCK_PATH = "./run/session-manager.lock"
 
 DEFAULT_SHM_NAME = "nexus-rx"
-DEFAULT_ARENA_BYTES = 268_435_456
-DEFAULT_SLOT_BYTES = 4_194_304
+# Whole completion segment: header + session table + receiver region.
+# 320 MiB covers the receivers' block tables and slot arena with headroom;
+# the container needs shm_size above this (compose.yml sets 512m).
+DEFAULT_SEGMENT_BYTES = 335_544_320
 
 DEFAULT_POLL_INTERVAL_S = 1.0
 DEFAULT_SHM_CROSSCHECK = True

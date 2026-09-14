@@ -124,7 +124,9 @@ async def test_two_peers_exchange_messages_both_ways(tmp_path: Path) -> None:
 
         assert not serve_task.done()
 
-        purge = rx_pb2.PurgeSession(session_id="s1", reason="verified")
+        purge = rx_pb2.PurgeSession(
+            session_id="s1", reason=rx_pb2.PurgeReason.PURGE_REASON_PUBLISHED
+        )
         await server.send(ReceiverId(2), codec.encode(purge))
         received_after = await asyncio.wait_for(
             loop.sock_recv(client_b, RECV_BUFFER_BYTES), timeout=1
@@ -263,7 +265,9 @@ async def test_a_reconnecting_peer_keeps_its_live_queue_when_the_stale_one_tears
 
         assert server._peers.get(ReceiverId(1)) is live_queue
 
-        purge = rx_pb2.PurgeSession(session_id="s1", reason="verified")
+        purge = rx_pb2.PurgeSession(
+            session_id="s1", reason=rx_pb2.PurgeReason.PURGE_REASON_PUBLISHED
+        )
         await server.send(ReceiverId(1), codec.encode(purge))
         received = await asyncio.wait_for(loop.sock_recv(second, RECV_BUFFER_BYTES), timeout=1)
         assert codec.decode(received) == ("purge_session", purge)

@@ -245,7 +245,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
     ipc = UdsIpcServer(config.paths.socket_path, expected_proto_hash=expected_proto_hash)
     file_lock = FlockFileLock(config.paths.lock_path)
     registry = ReceiverRegistry(clock, heartbeat_interval_s=HEARTBEAT_INTERVAL_SECONDS)
-    shm = PosixShm(slot_bytes=config.shm.slot_bytes, probe_receiver_alive=registry.any_alive)
+    shm = PosixShm(probe_receiver_alive=registry.any_alive)
 
     async def broadcast(payload: bytes) -> None:
         for receiver_id in registry.active_receivers():
@@ -325,7 +325,7 @@ async def run(config: AppConfig, shutdown_event: asyncio.Event | None = None) ->
         shm_name=config.shm.name,
         staging_dir=str(config.paths.staging_dir),
         journal_dir=str(config.paths.journal_dir),
-        arena_bytes=config.shm.arena_bytes,
+        segment_bytes=config.shm.segment_bytes,
         session_region_base=session_region_base,
         sweep_interval_s=config.purge.sweep_interval_s,
         stall_timeout_s=config.purge.stall_timeout_s,

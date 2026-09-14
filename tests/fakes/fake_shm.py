@@ -2,6 +2,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 
+from session_manager.adapters.constants import (
+    RECEIVER_REGION_OFFSET,
+    SHM_SESSION_TABLE_OFFSET,
+)
 from session_manager.adapters.shm_layout import (
     HEADER_SIZE,
     AdoptDecision,
@@ -11,7 +15,7 @@ from session_manager.adapters.shm_layout import (
 from session_manager.domain.ids import BlockId, SessionId
 from session_manager.domain.models import OpenSession, SessionSpec
 
-DEFAULT_FAKE_ARENA_BYTES = 4096
+DEFAULT_FAKE_SEGMENT_BYTES = 4096
 
 # A non-zero fill for an existing segment's payload so a test can tell "adopt
 # left the bytes alone" from "reinitialise zeroed them".
@@ -33,8 +37,10 @@ class _SessionRegion:
     bitmap_len: int
 
 
-def _valid_header() -> bytes:
-    return build_header(b"\x00" * 16, 0, 0, 0)
+def _valid_header(total_size: int) -> bytes:
+    return build_header(
+        b"\x00" * 16, 0, SHM_SESSION_TABLE_OFFSET, RECEIVER_REGION_OFFSET, total_size
+    )
 
 
 class FakeShm:
@@ -66,7 +72,7 @@ class FakeShm:
     # --- test-driven setup -------------------------------------------------
 
     def set_existing_segment(
-        self, state: SegmentState, arena_bytes: int = DEFAULT_FAKE_ARENA_BYTES
+        self, state: SegmentState, segment_bytes: int = DEFAULT_FAKE_SEGMENT_BYTES
     ) -> None:
         if state is SegmentState.ABSENT:
             self._buffer = None
@@ -74,8 +80,8 @@ class FakeShm:
             self._sessions.clear()
             return
 
-        buffer = bytearray([_SENTINEL_BYTE]) * arena_bytes
-        buffer[:HEADER_SIZE] = _valid_header()
+        buffer = bytearray([_SENTINEL_BYTE]) * segment_bytes
+        buffer[:HEADER_SIZE] = _valid_header(len(buffer))
         self._buffer = buffer
         self._sessions.clear()
 
@@ -139,14 +145,14 @@ class FakeShm:
 
     # --- ShmWriter ------------------------------------------------------
 
-    def create_or_adopt(self, name: str, arena_bytes: int) -> bool:
+    def create_or_adopt(self, name: str, segment_bytes: int) -> bool:
         if self._pending_create_errors:
             raise self._pending_create_errors.pop(0)
         self._attached_name = name
 
         if self._buffer is None:
-            fresh = bytearray(arena_bytes)
-            fresh[:HEADER_SIZE] = _valid_header()
+            fresh = bytearray(segment_bytes)
+            fresh[:HEADER_SIZE] = _valid_header(len(fresh))
             self._buffer = fresh
             self.last_decision = AdoptDecision.CREATED
             return False
@@ -173,7 +179,7 @@ class FakeShm:
         if bitmap_offset + bitmap_len > len(buffer):
             raise ValueError(
                 f"session {spec.session_id} bitmap [{bitmap_offset}, "
-                f"{bitmap_offset + bitmap_len}) does not fit an arena of {len(buffer)}"
+                f"{bitmap_offset + bitmap_len}) does not fit a segment of {len(buffer)}"
             )
 
         self._sessions[spec.session_id] = _SessionRegion(
@@ -237,7 +243,7 @@ class FakeShm:
         if buffer is None:
             raise RuntimeError("reinitialise with no segment")
         buffer[HEADER_SIZE:] = bytes(len(buffer) - HEADER_SIZE)
-        buffer[:HEADER_SIZE] = _valid_header()
+        buffer[:HEADER_SIZE] = _valid_header(len(buffer))
         self._sessions.clear()
         self.last_decision = AdoptDecision.REINITIALISED
 

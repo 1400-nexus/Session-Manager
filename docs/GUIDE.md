@@ -191,7 +191,7 @@ sender                   ← A's, C++
 receiver                 ← B's, C++
 ```
 
-**Current pin: `7f406db`. Contract digest: `38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df`.**
+**Current pin: `7f757c5`. Contract digest: `5b1483b951ae1a4affbed914dd2fb60e696871c7e1140e944c41c324d1b4e6ec`.**
 
 Both Python services are on that pin and compute that digest. Any process that
 opens a UDS connection must build against the same commit, or the handshake is
@@ -633,10 +633,11 @@ The layout, verified with `struct.calcsize`:
 
 | Item | Value |
 |---|---|
-| `SHM_HEADER_FORMAT` | `"<4sI16sIIIQ"` → **44 bytes** |
-| magic / version | `NXRX` / 1 |
+| `SHM_HEADER_FORMAT` | `"<4sI16sIQQQ"` → **52 bytes** |
+| magic / version | `NXRX` / 2 |
 | `SHM_SESSION_TABLE_OFFSET` | 64 |
 | `SHM_SESSION_TABLE_BYTES` | 4096 reserved |
+| `RECEIVER_REGION_OFFSET` | 4160 — the one-line boundary: manager below, receivers above |
 | `SHM_SESSION_ENTRY_FORMAT` | `"<40sQQQ"` → **64 bytes** |
 | `SHM_SESSION_ID_BYTES` | 40 |
 
@@ -682,8 +683,7 @@ the schema implies them:
 | `paths.journal_dir` | `./journal` | also holds the spec sidecars |
 | `paths.lock_path` | `./run/session-manager.lock` | `flock` target |
 | `shm.name` | `nexus-rx` | receivers learn it from `Config` |
-| `shm.arena_bytes` | 268,435,456 | 256 MiB → compose needs `shm_size: 512m` |
-| `shm.slot_bytes` | 4,194,304 | stamped into the header as `slot_bytes` / `slot_count` — a slot model the manager does not use — not the receiver's slot geometry, do not read or derive from them; removed in the next shm header revision |
+| `shm.segment_bytes` | 335,544,320 | 320 MiB whole segment (header + session table + receiver region) → compose needs `shm_size: 512m` |
 | `aggregation.poll_interval_s` | 1.0 | how often `BlockDecoded` folds are turned into snapshots / COMPLETE |
 | `aggregation.shm_crosscheck` | **false** | off until a receiver writes the bitmap. **`DEFAULT_SHM_CROSSCHECK` in code is `True`** — the value if the key is absent |
 | `purge.sweep_interval_seconds` | 5.0 | `SessionAuthority` sweeps open sessions this often for a terminal state |
@@ -838,14 +838,12 @@ connection outright. Needs `SENDER_CONTRACT.md` and the pin.
 `RECEIVER_CONTRACT.md`, and the newest property will surprise him: bytes must be
 durable before reporting `BlockDecoded`.
 
-**One open question for B:** does the receiver write the shm completion bitmap,
-or is `BlockDecoded` over UDS the only progress path? The cross-check is off and
-quiet either way — keep it if he writes bits, delete it if not.
-[`ANSWERS_FROM_C_002.md`](ANSWERS_FROM_C_002.md) is C's reply — **no** — and
-the shm/proto changes it unblocks: a single `receiver_region_offset` /
-`total_size` boundary in the header (killing the negotiated slot layout,
-`SessionOpen.7`/`.8`, and C's bump allocator), `SessionOpen.file_size` field 9,
-and `PurgeSession.reason` as an enum. None landed.
+**Settled — the receiver does not write the bitmap.** [`ANSWERS_FROM_C_002.md`](ANSWERS_FROM_C_002.md)
+is C's reply — **no**, `BlockDecoded` over UDS is the sole progress path — and
+the changes it unblocked that have now landed: a single `receiver_region_offset` /
+`total_size` boundary in the header (v2), `SessionOpen.file_size` field 9,
+and `PurgeSession.reason` as an enum. Still queued: deleting C's bump allocator
+and `SessionOpen.7`/`.8` becoming `reserved` (gated on the deprecation release).
 [`CROSS_TEAM_PENDING.md`](CROSS_TEAM_PENDING.md) is the live index — every
 confirmation C is waiting on from A and B, and which of the four queued
 changes it unblocks.

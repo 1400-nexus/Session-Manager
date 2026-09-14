@@ -28,13 +28,14 @@ __all__ = [
 class PurgeReason(Enum):
     """Why a session reached a terminal state.
 
-    ``rx.proto``'s ``PurgeSession.reason`` is a free-text ``string``, not an
-    enum. These members are an internal vocabulary; the boundary layer
-    (``SessionAuthority._PURGE_REASON_WIRE``) maps them to the wire strings
-    documented in ``session-manager/docs/RECEIVER_CONTRACT.md`` section 4 --
-    ``PUBLISHED`` -> ``"verified"``, ``QUARANTINED`` -> ``"hash_mismatch"``,
-    ``INCOMPLETE`` -> ``"incomplete"``. The member ``.value`` strings here
-    are *not* the wire form; do not send them.
+    ``rx.proto``'s ``PurgeSession.reason`` is the ``PurgeReason`` enum, not a
+    free-text string. These members are an internal vocabulary; the boundary
+    layer (``SessionAuthority._PURGE_REASON_WIRE``) maps them to the wire enum
+    values documented in ``session-manager/docs/RECEIVER_CONTRACT.md``
+    section 4 -- ``PUBLISHED`` -> ``PURGE_REASON_PUBLISHED``,
+    ``QUARANTINED`` -> ``PURGE_REASON_QUARANTINED``, ``INCOMPLETE`` ->
+    ``PURGE_REASON_INCOMPLETE``. The member ``.value`` strings here are *not*
+    the wire form; do not send them.
     """
 
     PUBLISHED = "published"

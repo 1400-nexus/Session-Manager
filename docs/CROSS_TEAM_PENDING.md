@@ -6,16 +6,26 @@ what, and which queued change it unblocks. Full context in
 [`rx.proto.patch.md`](rx.proto.patch.md) (the exact proto diff + `proto_hash`
 command).
 
-## The queue
+## Landed in `nexus-proto@7f757c5`
 
-Nothing below is landed. Each is "B/A says yes, then C opens the commit."
+- **Item A** — one `nexus-proto` commit: `SessionOpen.file_size = 9`;
+  `SessionOpen.7`/`.8` deprecated (still populated, wire-present); and
+  **`PurgeSession.reason` `string` → `enum`** (taken, not vetoed). New digest
+  `5b1483b9…4e6ec`; A + B re-pinned once. `reserved 7, 8` still to come, one
+  release later.
+- **Item B** — shm header v2: `receiver_region_offset` + `total_size` added,
+  `slot_bytes` + `slot_count` dropped, `SHM_VERSION` 1→2. No session-table
+  change. B confirmed: no bitmap write exists (CompletionBitmap reserved,
+  never written), receivers never open the manager segment, tails are
+  hard-failed on open.
+- **Item D** — `arena_bytes` → `segment_bytes`, value 256 → 320 MiB.
+  `compose.yml` unchanged (`shm_size: 512m` already covers it).
 
-| Item | Change | Reference |
-|---|---|---|
-| **A** | one `nexus-proto` commit, `proto_hash` bump, A + B re-pin once: `SessionOpen.file_size = 9`; `SessionOpen.7`/`.8` → `deprecated` then `reserved`; **`PurgeSession.reason` `string` → `enum`** (a wire break — vetoable) | `rx.proto.patch.md` |
-| **B** | shm header: add `receiver_region_offset` + `total_size`, drop `slot_bytes` + `slot_count`, `SHM_VERSION` 1→2. ~15 files, ~120–150 lines + B's C++ struct. No session-table change. | `ANSWERS_FROM_C_002.md` §1 |
-| **C** | delete C's `_next_offset` per-session bump allocator + the `region_end > arena_bytes` check | gated on A's `reserved 7, 8` |
-| **D** | `arena_bytes` → `segment_bytes` (~20 files, mechanical); value 256 → 320 MiB. Pairs with B. | `ANSWERS_FROM_C_002.md` §1 |
+## Still queued
+
+- **Item C** — delete C's `_next_offset` per-session bump allocator + the
+  `region_end > segment_bytes` check. Gated on `reserved 7, 8` (fields are
+  only deprecated in this release, still populated). One release later.
 
 ## Waiting on B
 

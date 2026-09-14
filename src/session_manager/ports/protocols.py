@@ -102,7 +102,7 @@ class ShmWriter(Protocol):
     its mapping.
     """
 
-    def create_or_adopt(self, name: str, arena_bytes: int) -> bool: ...
+    def create_or_adopt(self, name: str, segment_bytes: int) -> bool: ...
 
     def init_session(
         self, spec: SessionSpec, block_table_offset: int, bitmap_offset: int

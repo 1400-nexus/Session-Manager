@@ -3,9 +3,9 @@
 Run top to bottom. Each step isolates one variable, so a failure points at one
 thing. Do not skip ahead; step N assumes N−1 passed.
 
-Prerequisite: the `receiver` repo has a buildable C++ binary. As of this
-writing it does not (one commit, README only), so integration cannot start.
-Steps 1–2 are the first things to do once it exists.
+Prerequisite: the `receiver` repo has a buildable C++ binary (`cmake -B
+build -G Ninja && cmake --build build`, `ctest` green in `receiver/tests/`).
+Steps 1–2 are the handshake + one-real-receiver proofs; run them first.
 
 Everything here is **native** (`python -m session_manager.main`, a real
 `nexus-receiver` binary). The graded machines run native. Containers come after
@@ -16,7 +16,7 @@ step 6.
 ## Step 1 — Contract hash agreement
 
 **Proves:** every process that opens a UDS connection computes the same
-`proto_hash` from `nexus-proto@7f406db`. One minute of work; nothing downstream
+`proto_hash` from `nexus-proto@7f757c5`. One minute of work; nothing downstream
 can work if this is wrong.
 
 **This is not just a receiver concern.** `file-monitor` is the UDS server on the
@@ -29,15 +29,14 @@ both Python services) must build against the **same commit**:
 
 | process | connects to | must be on |
 |---|---|---|
-| `file-monitor` | — (server) | `7f406db` |
-| N senders | `file-monitor` | `7f406db` |
-| `session-manager` | — (server) | `7f406db` |
-| N receivers | `session-manager` | `7f406db` |
+| `file-monitor` | — (server) | `7f757c5` |
+| N senders | `file-monitor` | `7f757c5` |
+| `session-manager` | — (server) | `7f757c5` |
+| N receivers | `session-manager` | `7f757c5` |
 
-As of this writing the `sender` repo is pinned at `60bd06e` (five commits
-behind `7f406db`) — **that sender will be refused by `file-monitor`**, and it
-is also missing `AssignSession.source_path` and the `Manifest.sender_id`
-shard-residue comment. It must be bumped before step 6; see
+`proto_hash` covers *all* `.proto` files, including ones a given process
+never compiles — so an RX-side-only change still moves a sender's hash.
+Re-pin on every `nexus-proto` commit, no exceptions; see
 `file-monitor/docs/SENDER_CONTRACT.md`.
 
 **Run:**
@@ -53,10 +52,10 @@ python -c "from session_manager.ipc.handshake import compute_proto_hash; \
 B computes the same hash in C++ over the same `.proto` directory (the algorithm
 is in `RECEIVER_CONTRACT.md §2` / `ipc/handshake.py`) and prints it hex.
 
-At `nexus-proto@7f406db` this is:
+At `nexus-proto@7f757c5` this is:
 
 ```
-38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df
+5b1483b951ae1a4affbed914dd2fb60e696871c7e1140e944c41c324d1b4e6ec
 ```
 
 (Recompute rather than trusting this line — it changes with any `.proto` edit,
@@ -66,7 +65,7 @@ including a comment.)
 
 **Failure means:** one of —
 - Different `nexus-proto` commit. Check `git -C libs/nexus-proto rev-parse HEAD`
-  everywhere; all must be `7f406db`.
+  everywhere; all must be `7f757c5`.
 - The implementation stripped comments or normalized whitespace. The algorithm
   hashes **raw bytes**.
 - Filenames sorted by something other than byte-wise ASCII, or a separator added

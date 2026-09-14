@@ -47,7 +47,7 @@ composition root that wires everything into one process under an
 ## Setup
 
 ```bash
-git submodule update --init          # pulls in libs/nexus-proto (pinned 7f406db)
+git submodule update --init          # pulls in libs/nexus-proto (pinned 7f757c5)
 cp .env.example .env && source .env  # sets PYTHONPATH for the generated protobuf code
 pip install -e '.[dev]'
 python -m session_manager.main       # reads ./config.toml by default
@@ -96,8 +96,7 @@ file's own directory*, not the process's working directory.
 | `paths.socket_path` | `NEXUS_SOCKET_PATH` | `./run/session-manager.sock` | `AF_UNIX`, `SOCK_SEQPACKET`. |
 | `paths.lock_path` | `NEXUS_LOCK_PATH` | `./run/session-manager.lock` | `fcntl` single-instance lock. |
 | `shm.name` | `NEXUS_SHM_NAME` | `nexus-rx` | Completion segment name. **Receivers that write the bitmap must use the same value.** |
-| `shm.arena_bytes` | `NEXUS_SHM_ARENA_BYTES` | `268435456` | Segment size (256 MB). A container needs `shm_size` ≥ this. |
-| `shm.slot_bytes` | `NEXUS_SHM_SLOT_BYTES` | `4194304` | Stamped into the header as `slot_bytes` / `slot_count` — a slot model the manager does not use — not the receiver's slot geometry, do not read or derive from them; removed in the next shm header revision. |
+| `shm.segment_bytes` | `NEXUS_SHM_SEGMENT_BYTES` | `335544320` | Whole segment size (320 MiB: header + session table + receiver region). A container needs `shm_size` above this. |
 | `aggregation.poll_interval_s` | `NEXUS_AGGREGATION_POLL_INTERVAL_S` | `1.0` | How often completion state is recomputed. |
 | `aggregation.shm_crosscheck` | `NEXUS_AGGREGATION_SHM_CROSSCHECK` | `false` | Cross-check the UDS decoded count against the shm bitmap popcount. Off until a receiver actually writes the bitmap; the UDS `BlockDecoded` stream is authoritative on its own. |
 | `purge.sweep_interval_seconds` | `NEXUS_PURGE_SWEEP_INTERVAL_SECONDS` | `5.0` | How often the session authority sweeps open sessions for a terminal state. Must be `< stall_timeout_seconds`. |
@@ -118,7 +117,7 @@ writes garbage that looks like packet loss.
 The `nexus-proto` pin and `proto_hash` are a cross-service contract: a mismatch
 does not fail loudly on its own, it refuses every receiver's handshake — the
 same for a sender against `file-monitor`. Check
-`git -C libs/nexus-proto rev-parse HEAD` — it must be `7f406db`, and every
+`git -C libs/nexus-proto rev-parse HEAD` — it must be `7f757c5`, and every
 other UDS peer in the system must build against the same commit.
 
 ## Running in a container
@@ -129,7 +128,7 @@ supported and is what the graded machines run.
 
 Three things are specific to this service:
 
-- **`shm_size: 512m`** in `compose.yml` — the completion arena is 256 MB and the
+- **`shm_size: 512m`** in `compose.yml` — the completion segment is 320 MB and the
   container default `/dev/shm` is 64 MB, so `create_or_adopt` would fail at
   startup without it.
 - **One named volume for all of `/var/nexus`** — `staging_dir` and `output_dir`

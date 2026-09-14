@@ -12,8 +12,8 @@ lock_path = "./run/session-manager.lock"
 
 [shm]
 name = "nexus-rx"
-arena_bytes = 268435456
-slot_bytes = 4194304
+# Whole completion segment: header + session table + receiver region.
+segment_bytes = 335544320
 
 [aggregation]
 poll_interval_s = 1.0

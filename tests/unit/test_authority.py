@@ -28,7 +28,7 @@ from tests.fakes.fake_shm import FakeShm
 # Long, so a session created in a test is never accidentally past it.
 STALL_TIMEOUT = 1_000.0
 
-ARENA_BYTES = 1 << 20
+SEGMENT_BYTES = 1 << 20
 REGION_BASE = 8192
 SHM_NAME = "nexus-rx-test"
 
@@ -174,7 +174,7 @@ def _rig(
         shm_name=SHM_NAME,
         staging_dir="/var/nexus/staging",
         journal_dir="/var/nexus/journal",
-        arena_bytes=ARENA_BYTES,
+        segment_bytes=SEGMENT_BYTES,
         session_region_base=REGION_BASE,
         sweep_interval_s=sweep_interval_s,
         stall_timeout_s=stall_timeout_s,
@@ -211,6 +211,8 @@ async def test_three_simultaneous_manifest_seen_produce_one_session_open() -> No
     assert field_name == "session_open"
     assert session_open.session_id == "s-1"
     assert session_open.block_bytes == SYMBOL_BYTES
+    # A late joiner that never saw the Manifest learns file_size here alone.
+    assert session_open.file_size == FILE_SIZE
     assert [receiver_id for receiver_id, _ in rig.sends] == [R2, R3]
     for _, payload in rig.sends:
         name, duplicate_reply = codec.decode(payload)
@@ -500,7 +502,7 @@ async def test_purge_broadcasts_purge_session_once_then_dedupes() -> None:
     field_name, message = codec.decode(rig.broadcasts[0])
     assert field_name == "purge_session"
     assert cast(Any, message).session_id == "s-1"
-    assert cast(Any, message).reason == "verified"  # the wire string is unchanged
+    assert cast(Any, message).reason == rx_pb2.PurgeReason.PURGE_REASON_PUBLISHED
     assert rig.authority.is_purged(SessionId("s-1")) is True
 
 
@@ -579,7 +581,7 @@ async def test_a_session_that_never_received_a_block_is_swept_to_incomplete() ->
     assert stalled[0]["missing_block_count"] == 3
     field_name, message = codec.decode(rig.broadcasts[-1])
     assert field_name == "purge_session"
-    assert cast(Any, message).reason == "incomplete"
+    assert cast(Any, message).reason == rx_pb2.PurgeReason.PURGE_REASON_INCOMPLETE
     # marked INCOMPLETE, handed the path quarantine_incomplete() returned
     [(marked_id, marked_path)] = rig.incomplete_marks
     assert marked_id == SessionId("s-1")

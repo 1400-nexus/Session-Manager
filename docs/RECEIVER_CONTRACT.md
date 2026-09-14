@@ -4,14 +4,12 @@ Everything a C++ receiver needs to talk to `session-manager`. You should be able
 to implement against this document without reading the Python. Where it points
 at a source file, that file is the authority and this is a summary.
 
-Contract pin: **`nexus-proto` at `7f406db`**. Build your generated C++ from that
-exact commit. Nothing in the RX contract has changed structurally since
-`cef65a6` — the `rx.proto` edits since are all comments — but `proto_hash`
-covers the raw bytes of *every* `.proto` file (including `ipc.proto`, which
-gained an `AssignSession.source_path` field for the sender), so the hash has
-moved several times and a wrong one is a **refused connection** (see §2).
-Every process that opens a UDS connection — your receiver here, A's senders
-against `file-monitor` — must be on this same commit.
+Contract pin: **`nexus-proto` at `7f757c5`**. Build your generated C++ from that
+exact commit. `proto_hash` covers the raw bytes of *every* `.proto` file, so
+the hash moves with any edit (a comment included) and a wrong one is a
+**refused connection** (see §2). Every process that opens a UDS connection
+— your receiver here, A's senders against `file-monitor` — must be on this
+same commit.
 
 The file payload never crosses into `session-manager`. You FEC-decode blocks and
 write the bytes to disk yourself; `session-manager` aggregates your per-block
@@ -70,10 +68,10 @@ not match **byte for byte**, `verify_proto_hash` raises `ProtoHashMismatchError`
 and the manager closes your connection (`peer_proto_hash_mismatch` in its log).
 Other receivers on their own connections are unaffected.
 
-At `nexus-proto@7f406db` the digest is:
+At `nexus-proto@7f757c5` the digest is:
 
 ```
-38cac339d495241ae757fbeec84a6ecdc5377f838798ff9df1e19650bcff20df
+5b1483b951ae1a4affbed914dd2fb60e696871c7e1140e944c41c324d1b4e6ec
 ```
 
 (Recompute it — it changes with any `.proto` edit. On a Windows checkout,
@@ -163,13 +161,24 @@ message SessionOpen {
   uint32 k                   = 4;
   uint32 n                   = 5;
   uint32 block_bytes         = 6;  // SYMBOL size (echoes Manifest.block_bytes)
-  uint64 block_table_offset  = 7;  // byte offset into the shm segment
-  uint64 bitmap_offset       = 8;  // byte offset into the shm segment
+  uint64 block_table_offset  = 7;  // DEPRECATED — do not read (see below)
+  uint64 bitmap_offset       = 8;  // DEPRECATED — do not read (see below)
+  uint64 file_size           = 9;  // verbatim Manifest.file_size — REQUIRED
 }
 ```
 
 The manager's acknowledgement that the session exists and where it lives.
 Idempotent — see §5, property 2.
+
+`file_size` is the field a late joiner lives on: a receiver that connects
+after another receiver already sent `ManifestSeen` never saw the Manifest,
+so this message is its *only* source of session parameters. Size the
+staging view from it and bounds-check the final (short) block against it.
+
+Fields 7 and 8 are deprecated: the manager still populates them with valid
+offsets for one release so nothing breaks mid-re-pin, but `BlockDecoded`
+over UDS is the only progress path and these regions are going away (they
+become `reserved 7, 8`). Do not read them.
 
 ### `BlockDecoded` (R→M)
 
@@ -244,7 +253,7 @@ absolute — or `journal_dir`; they are there for completeness.
 ```
 message PurgeSession {
   string session_id = 1;
-  string reason     = 2;  // "verified" | "hash_mismatch" | "incomplete"
+  PurgeReason reason = 2;  // PUBLISHED | QUARANTINED | INCOMPLETE
 }
 ```
 
@@ -376,7 +385,14 @@ is **little-endian and standard-size (no alignment padding) by choice, not by
 accident** — a native ordering that happens to match on one build machine must
 not be mistaken for the contract.
 
-### Segment header — `SHM_HEADER_FORMAT = "<4sI16sIIIQ"`
+The boundary is one line: `[0, receiver_region_offset)` is the manager's
+(header + session table); `[receiver_region_offset, total_size)` is yours.
+The manager never writes past `receiver_region_offset`. Your half is yours
+to lay out however you like — but **hard-fail `open()` when the tail is too
+small for `total_blocks`** rather than trusting the manager to have sized it
+right.
+
+### Segment header — `SHM_HEADER_FORMAT = "<4sI16sIQQQ"`
 
 Maps directly onto a packed C++ struct. Offsets are from the start of the
 segment.
@@ -384,30 +400,21 @@ segment.
 | Field | C++ type | Offset | Width | Value |
 |---|---|---:|---:|---|
 | `magic` | `char[4]` | 0 | 4 | `"NXRX"` (`0x4E 0x58 0x52 0x58`) |
-| `version` | `uint32_t` LE | 4 | 4 | `1` (`SHM_VERSION`) |
+| `version` | `uint32_t` LE | 4 | 4 | `2` (`SHM_VERSION`) |
 | `boot_id` | `uint8_t[16]` | 8 | 16 | random, regenerated each manager start |
 | `owner_pid` | `uint32_t` LE | 24 | 4 | manager PID |
-| `slot_bytes` | `uint32_t` LE | 28 | 4 | `[shm].slot_bytes` — **do not read** (see below) |
-| `slot_count` | `uint32_t` LE | 32 | 4 | `arena_bytes / slot_bytes` — **do not read** |
-| `session_table_offset` | `uint64_t` LE | 36 | 8 | `64` (`SHM_SESSION_TABLE_OFFSET`) |
+| `session_table_offset` | `uint64_t` LE | 28 | 8 | `64` (`SHM_SESSION_TABLE_OFFSET`) |
+| `receiver_region_offset` | `uint64_t` LE | 36 | 8 | `4160` (header reservation + session table) |
+| `total_size` | `uint64_t` LE | 44 | 8 | whole segment size in bytes |
 
-Packed size is **44 bytes**; bytes 44–63 are reserved. **Validity is `magic` +
+Packed size is **52 bytes**; bytes 52–63 are reserved. **Validity is `magic` +
 `version` only.** The rest is informational — `boot_id` / `owner_pid` let an
 operator spot a segment left by a previous boot.
 
-> **`slot_bytes` / `slot_count` are not your slot geometry — do not read them
-> or derive anything from them.** They describe a slot model the manager does
-> **not** use: the manager's arena is this header, then the session table,
-> then bump-allocated per-session bitmap regions — nothing is slot-indexed.
-> The fields are written from `[shm].slot_bytes` in the manager's own config
-> (`4194304` / a computed `64`) and the manager never reads them back. Your
-> `SLOT_SIZE` is `1536`; the header's `4194304` and `64` are unrelated
-> numbers, and treating either as an arena dimension gives you a mapping
-> ~2700× too small. Nothing detects this: the manager doesn't read the
-> fields, and `proto_hash` does not cover the shm header. Get the segment
-> size from `fstat` on the shm fd, or from the `receiver_region_offset` /
-> `total_size` fields once the header change in `ANSWERS_FROM_C_002.md` §1
-> lands — at which point these two fields are removed.
+> The old header's `slot_bytes` / `slot_count` fields are gone (header v2).
+> They described a slot model the manager never used — not your `SLOT_SIZE`
+> geometry. If you kept a copy of the v1 layout, delete it; the only shared
+> numbers now are the two offsets and the total above.
 
 ### Session table — at offset 64
 
@@ -430,24 +437,17 @@ region. The two are independent, with independent ceilings — the effective
 concurrent-session limit is the **lower of the manager's 63 and your
 `MAX_SESSIONS`**, and neither side negotiates the other's.
 
-You can read this table, or take the per-session offsets straight from
-`SessionOpen` fields 7 and 8 — they are identical. (Both go away with the
-header change in `ANSWERS_FROM_C_002.md` §1: `BlockDecoded` over UDS is the
-only progress path, so the manager stops carving per-session bitmap regions
-and `SessionOpen.7`/`.8` become `reserved`.)
+The per-session `block_table_offset` / `bitmap_offset` columns are still
+populated with valid offsets for one release (matching the deprecated
+`SessionOpen` fields 7 and 8) but are going away with them — do not read
+either. For reference, each session's regions are `ceil(total_blocks / 8)`
+bytes each: a **`block_table`** at `block_table_offset` and a **`bitmap`**
+at `bitmap_offset` (bit `i`, LSB-first within each byte, set = block `i`
+complete).
 
-### Per-session regions
-
-For each session the manager carves two equal regions, each
-`ceil(total_blocks / 8)` bytes:
-
-- **`block_table`** at `block_table_offset`
-- **`bitmap`** at `bitmap_offset` — bit `i` (LSB-first within each byte) set =
-  block `i` complete.
-
-The manager's optional cross-check reads a **popcount of the `bitmap` region**
-and compares it to its UDS-derived decoded count. It never writes these regions
-for a running session (it zeroes the `bitmap` once at session open).
+The manager's optional cross-check reads a **popcount of the `bitmap` region** and compares it to its UDS-derived decoded count. It never
+writes these regions for a running session (it zeroes the `bitmap` once at
+session open).
 
 ### The segment name
 
@@ -457,10 +457,13 @@ convention-coupling is exactly what `Config` exists to remove.
 
 ---
 
-## 7. The open question — for you to answer
+## 7. The settled question — bitmap writing
 
-**Does your receiver write the shm completion `bitmap`, or is `BlockDecoded`
-over UDS the only progress path?**
+**Settled: the receiver does not write the completion bitmap.** `BlockDecoded`
+over UDS is the sole progress path — not a fallback, not a cross-check. The
+manager's restart recovery comes from its append-only journal (every
+`BlockDecoded` is journalled *before* it is folded into the completion set),
+which survives receiver restarts and machine reboots, unlike shm.
 
 - The UDS `BlockDecoded` stream is authoritative and sufficient on its own. A
   working receiver can ignore shm entirely for progress reporting and still
@@ -468,10 +471,3 @@ over UDS the only progress path?**
 - The shm cross-check exists only to catch a disagreement between the two. It is
   **off by default** (`[aggregation].shm_crosscheck = false`) and, when on, warns
   **once per session** rather than every poll.
-- If your answer is **no**, the cross-check code
-  (`ProgressAggregator._cross_check` / `_bitmap_popcount`, `ShmReader.bitmap_for`,
-  `ShmReader.block_table_seen`) will be **deleted** — it is dead weight otherwise.
-- If your answer is **yes**, keep it, and confirm the bit ordering above so the
-  popcount and your writes agree.
-
-Reply with yes/no and we'll settle it before integration step 2.

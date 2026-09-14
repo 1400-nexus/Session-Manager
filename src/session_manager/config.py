@@ -5,11 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from session_manager.adapters.constants import RECEIVER_REGION_OFFSET
 from session_manager.constants import (
     AGGREGATION_SECTION,
-    ARENA_BYTES_ENV_VAR,
-    ARENA_BYTES_KEY,
-    DEFAULT_ARENA_BYTES,
     DEFAULT_FORCE_TERMINAL,
     DEFAULT_JOURNAL_DIR,
     DEFAULT_LOCK_PATH,
@@ -20,9 +18,9 @@ from session_manager.constants import (
     DEFAULT_RECEIVER_PORTS,
     DEFAULT_REFRESH_INTERVAL_S,
     DEFAULT_RUN_DIR,
+    DEFAULT_SEGMENT_BYTES,
     DEFAULT_SHM_CROSSCHECK,
     DEFAULT_SHM_NAME,
-    DEFAULT_SLOT_BYTES,
     DEFAULT_SOCKET_PATH,
     DEFAULT_STAGING_DIR,
     DEFAULT_STALL_TIMEOUT_SECONDS,
@@ -34,7 +32,6 @@ from session_manager.constants import (
     LOCK_PATH_ENV_VAR,
     LOCK_PATH_KEY,
     MAX_PORT,
-    MIN_ARENA_SLOTS,
     MIN_PORT,
     OUTPUT_DIR_ENV_VAR,
     OUTPUT_DIR_KEY,
@@ -54,13 +51,13 @@ from session_manager.constants import (
     REFRESH_INTERVAL_S_KEY,
     RUN_DIR_ENV_VAR,
     RUN_DIR_KEY,
+    SEGMENT_BYTES_ENV_VAR,
+    SEGMENT_BYTES_KEY,
     SHM_CROSSCHECK_ENV_VAR,
     SHM_CROSSCHECK_KEY,
     SHM_NAME_ENV_VAR,
     SHM_NAME_KEY,
     SHM_SECTION,
-    SLOT_BYTES_ENV_VAR,
-    SLOT_BYTES_KEY,
     SOCKET_PATH_ENV_VAR,
     SOCKET_PATH_KEY,
     STAGING_DIR_ENV_VAR,
@@ -100,8 +97,7 @@ ENV_OVERRIDES: tuple[tuple[str, str, str, Callable[[str], Any]], ...] = (
     (SOCKET_PATH_ENV_VAR, PATHS_SECTION, SOCKET_PATH_KEY, str),
     (LOCK_PATH_ENV_VAR, PATHS_SECTION, LOCK_PATH_KEY, str),
     (SHM_NAME_ENV_VAR, SHM_SECTION, SHM_NAME_KEY, str),
-    (ARENA_BYTES_ENV_VAR, SHM_SECTION, ARENA_BYTES_KEY, int),
-    (SLOT_BYTES_ENV_VAR, SHM_SECTION, SLOT_BYTES_KEY, int),
+    (SEGMENT_BYTES_ENV_VAR, SHM_SECTION, SEGMENT_BYTES_KEY, int),
     (POLL_INTERVAL_S_ENV_VAR, AGGREGATION_SECTION, POLL_INTERVAL_S_KEY, float),
     (SHM_CROSSCHECK_ENV_VAR, AGGREGATION_SECTION, SHM_CROSSCHECK_KEY, _parse_bool),
     (RECEIVER_COUNT_ENV_VAR, RECEIVERS_SECTION, RECEIVER_COUNT_KEY, int),
@@ -127,8 +123,7 @@ class PathsConfig:
 @dataclass(frozen=True)
 class ShmConfig:
     name: str
-    arena_bytes: int
-    slot_bytes: int
+    segment_bytes: int
 
 
 @dataclass(frozen=True)
@@ -247,8 +242,7 @@ def load_config(config_path: Path) -> AppConfig:
         ),
         shm=ShmConfig(
             name=str(shm_data.get(SHM_NAME_KEY, DEFAULT_SHM_NAME)),
-            arena_bytes=int(shm_data.get(ARENA_BYTES_KEY, DEFAULT_ARENA_BYTES)),
-            slot_bytes=int(shm_data.get(SLOT_BYTES_KEY, DEFAULT_SLOT_BYTES)),
+            segment_bytes=int(shm_data.get(SEGMENT_BYTES_KEY, DEFAULT_SEGMENT_BYTES)),
         ),
         aggregation=AggregationConfig(
             poll_interval_s=float(
@@ -303,19 +297,12 @@ def validate_config(app_config: AppConfig) -> None:
         )
 
     shm = app_config.shm
-    if shm.slot_bytes <= 0:
-        raise ValueError(f"shm.slot_bytes must be > 0, got {shm.slot_bytes}")
-    if shm.arena_bytes <= 0:
-        raise ValueError(f"shm.arena_bytes must be > 0, got {shm.arena_bytes}")
-    if shm.arena_bytes % shm.slot_bytes != 0:
+    if shm.segment_bytes <= 0:
+        raise ValueError(f"shm.segment_bytes must be > 0, got {shm.segment_bytes}")
+    if shm.segment_bytes <= RECEIVER_REGION_OFFSET:
         raise ValueError(
-            f"shm.arena_bytes ({shm.arena_bytes}) must be a multiple of "
-            f"shm.slot_bytes ({shm.slot_bytes})"
-        )
-    if shm.arena_bytes < shm.slot_bytes * MIN_ARENA_SLOTS:
-        raise ValueError(
-            f"shm.arena_bytes ({shm.arena_bytes}) must be at least "
-            f"shm.slot_bytes * {MIN_ARENA_SLOTS} ({shm.slot_bytes * MIN_ARENA_SLOTS})"
+            f"shm.segment_bytes ({shm.segment_bytes}) must exceed the manager "
+            f"region end ({RECEIVER_REGION_OFFSET})"
         )
 
     receivers = app_config.receivers

@@ -40,7 +40,7 @@ from tests.fakes.fake_journal import FakeJournal
 from tests.fakes.fake_session_spec_store import FakeSessionSpecStore
 from tests.fakes.fake_shm import FakeShm
 
-ARENA_BYTES = 1 << 20
+SEGMENT_BYTES = 1 << 20
 REGION_BASE = 8192
 SESSION = SessionId("s-1")
 
@@ -104,7 +104,7 @@ def _context(
         shm_name="seg",
         staging_dir="/staging",
         journal_dir="/journal",
-        arena_bytes=ARENA_BYTES,
+        segment_bytes=SEGMENT_BYTES,
         session_region_base=REGION_BASE,
         sweep_interval_s=0.0,  # tests here don't exercise the sweep
         stall_timeout_s=60.0,
@@ -328,7 +328,15 @@ async def test_dispatch_loop_warns_and_continues_on_an_unhandled_message_type() 
     context, _clock, _shm, _aggregator, _journal = _context()
     ipc = FakeIpcServer()
     ipc._incoming.put_nowait(
-        (ReceiverId(1), codec.encode(rx_pb2.PurgeSession(session_id="s-1", reason="done")))
+        (
+            ReceiverId(1),
+            codec.encode(
+                rx_pb2.PurgeSession(
+                    session_id="s-1",
+                    reason=rx_pb2.PurgeReason.PURGE_REASON_PUBLISHED,
+                )
+            ),
+        )
     )
     ipc._incoming.put_nowait((ReceiverId(1), codec.encode(rx_pb2.ReceiverHello(receiver_id=1))))
 
@@ -396,7 +404,7 @@ def test_build_receiver_specs_one_per_configured_receiver() -> None:
             socket_path=Path("run/x.sock"),
             lock_path=Path("run/x.lock"),
         ),
-        shm=ShmConfig(name="n", arena_bytes=4096, slot_bytes=1024),
+        shm=ShmConfig(name="n", segment_bytes=4096),
         aggregation=AggregationConfig(poll_interval_s=1.0, shm_crosscheck=True),
         receivers=ReceiversConfig(count=2, ports=(9100, 9101, 9102), binary_path="./bin/rx"),
         supervision=SupervisionConfig(),

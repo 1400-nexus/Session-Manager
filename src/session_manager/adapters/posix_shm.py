@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from multiprocessing import resource_tracker, shared_memory
 
 from session_manager.adapters.constants import (
+    RECEIVER_REGION_OFFSET,
     SHM_SESSION_TABLE_BYTES,
     SHM_SESSION_TABLE_OFFSET,
 )
@@ -79,8 +80,7 @@ class PosixShm:
     the shared contract test suite runs both against the same cases.
     """
 
-    def __init__(self, slot_bytes: int, probe_receiver_alive: Callable[[], bool]) -> None:
-        self._slot_bytes: int = slot_bytes
+    def __init__(self, probe_receiver_alive: Callable[[], bool]) -> None:
         self._probe_receiver_alive: Callable[[], bool] = probe_receiver_alive
         self._boot_id: bytes = os.urandom(_BOOT_ID_BYTES)
         self._segment: shared_memory.SharedMemory | None = None
@@ -91,12 +91,12 @@ class PosixShm:
 
     # --- ShmWriter -----------------------------------------------------
 
-    def create_or_adopt(self, name: str, arena_bytes: int) -> bool:
+    def create_or_adopt(self, name: str, segment_bytes: int) -> bool:
         self._name = name
         existing = self._open(name)
 
         if existing is None:
-            self._segment = self._create(name, arena_bytes)
+            self._segment = self._create(name, segment_bytes)
             self.last_decision = AdoptDecision.CREATED
             return False
 
@@ -121,7 +121,7 @@ class PosixShm:
         if bitmap_offset + bitmap_len > len(buffer):
             raise ValueError(
                 f"session {spec.session_id} bitmap [{bitmap_offset}, "
-                f"{bitmap_offset + bitmap_len}) does not fit an arena of {len(buffer)}"
+                f"{bitmap_offset + bitmap_len}) does not fit a segment of {len(buffer)}"
             )
         self._sessions[spec.session_id] = _SessionRegion(
             total_blocks=spec.total_blocks,
@@ -196,8 +196,8 @@ class PosixShm:
         detach_resource_tracker(existing)
         return existing
 
-    def _create(self, name: str, arena_bytes: int) -> shared_memory.SharedMemory:
-        segment = shared_memory.SharedMemory(name=name, create=True, size=arena_bytes)
+    def _create(self, name: str, segment_bytes: int) -> shared_memory.SharedMemory:
+        segment = shared_memory.SharedMemory(name=name, create=True, size=segment_bytes)
         detach_resource_tracker(segment)
         self._write_header(self._buffer_of(segment))
         return segment
@@ -235,13 +235,17 @@ class PosixShm:
         }
 
     def _write_header(self, buffer: memoryview) -> None:
-        # slot_bytes / slot_count are a slot model the manager does not use --
-        # not the receiver's slot geometry, do not read or derive from them;
-        # removed in the next shm header revision. Written only because the
-        # header format still has the fields; nothing reads them back.
-        slot_count = len(buffer) // self._slot_bytes if self._slot_bytes else 0
+        # The header publishes the one-line boundary, not a layout: our half
+        # is [0, RECEIVER_REGION_OFFSET), theirs is [RECEIVER_REGION_OFFSET,
+        # total_size). total_size is the actual mapped size -- the receiver
+        # hard-fails open() when the tail is too small for total_blocks
+        # rather than trusting our sizing.
         buffer[:HEADER_SIZE] = build_header(
-            self._boot_id, os.getpid(), self._slot_bytes, slot_count
+            self._boot_id,
+            os.getpid(),
+            SHM_SESSION_TABLE_OFFSET,
+            RECEIVER_REGION_OFFSET,
+            len(buffer),
         )
 
     def _buffer(self) -> memoryview:

@@ -27,7 +27,7 @@ def _valid_sections() -> dict[str, dict[str, object]]:
             "socket_path": "run/session-manager.sock",
             "lock_path": "run/session-manager.lock",
         },
-        "shm": {"name": "t", "arena_bytes": 40, "slot_bytes": 10},
+        "shm": {"name": "t", "segment_bytes": 8192},
         "aggregation": {
             "poll_interval_s": 1.0,
             "shm_crosscheck": True,
@@ -53,7 +53,7 @@ def _write_config(directory: Path, sections: dict[str, dict[str, object]]) -> Pa
 def test_valid_config_round_trips(tmp_path: Path) -> None:
     app_config = config.load_config(_write_config(tmp_path, _valid_sections()))
     assert app_config.paths.staging_dir == tmp_path / "staging"
-    assert app_config.shm.slot_bytes == 10
+    assert app_config.shm.segment_bytes == 8192
     assert app_config.receivers.ports == (9100, 9101, 9102)
     assert app_config.aggregation.shm_crosscheck is True
     assert app_config.supervision.crash_loop_max_restarts > 0
@@ -77,14 +77,13 @@ def test_relative_paths_resolve_against_config_dir_not_cwd(
 def test_env_override_replaces_the_toml_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("NEXUS_SHM_SLOT_BYTES", "20")
-    monkeypatch.setenv("NEXUS_SHM_ARENA_BYTES", "80")
+    monkeypatch.setenv("NEXUS_SHM_SEGMENT_BYTES", "16384")
     monkeypatch.setenv("NEXUS_RECEIVERS_PORTS", "7000,7001")
     monkeypatch.setenv("NEXUS_AGGREGATION_SHM_CROSSCHECK", "off")
 
     app_config = config.load_config(_write_config(tmp_path, _valid_sections()))
 
-    assert app_config.shm.slot_bytes == 20
+    assert app_config.shm.segment_bytes == 16384
     assert app_config.receivers.ports == (7000, 7001)
     assert app_config.aggregation.shm_crosscheck is False
 
@@ -113,27 +112,19 @@ def test_a_path_that_exists_as_a_file_is_rejected(tmp_path: Path) -> None:
         config.load_config(_write_config(tmp_path, _valid_sections()))
 
 
-def test_arena_bytes_must_be_a_multiple_of_slot_bytes(tmp_path: Path) -> None:
+def test_segment_bytes_must_be_positive(tmp_path: Path) -> None:
     sections = _valid_sections()
-    sections["shm"]["arena_bytes"] = 45
+    sections["shm"]["segment_bytes"] = 0
 
-    with pytest.raises(ValueError, match="multiple of"):
+    with pytest.raises(ValueError, match="shm.segment_bytes"):
         config.load_config(_write_config(tmp_path, sections))
 
 
-def test_arena_bytes_must_hold_the_minimum_slot_count(tmp_path: Path) -> None:
+def test_segment_bytes_must_exceed_the_manager_region(tmp_path: Path) -> None:
     sections = _valid_sections()
-    sections["shm"]["arena_bytes"] = 30
+    sections["shm"]["segment_bytes"] = 4160
 
-    with pytest.raises(ValueError, match=r"shm.arena_bytes.*at least"):
-        config.load_config(_write_config(tmp_path, sections))
-
-
-def test_slot_bytes_must_be_positive(tmp_path: Path) -> None:
-    sections = _valid_sections()
-    sections["shm"]["slot_bytes"] = 0
-
-    with pytest.raises(ValueError, match="shm.slot_bytes"):
+    with pytest.raises(ValueError, match=r"shm.segment_bytes.*manager region"):
         config.load_config(_write_config(tmp_path, sections))
 
 

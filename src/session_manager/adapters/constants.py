@@ -22,13 +22,14 @@ JOURNAL_SYNC_BATCH_SIZE = 200
 # Shared-memory completion segment header. The C++ receivers parse these exact
 # bytes, so the format is a cross-language contract: explicit little-endian
 # and standard packing (no native alignment padding). See adapters/shm_layout.py.
-# The real contract is magic, version and session_table_offset. The two u32s
-# between owner_pid and session_table_offset -- slot_bytes, slot_count -- are a
-# slot model the manager does not use -- not the receiver's slot geometry, do
-# not read or derive from them; removed in the next shm header revision.
-SHM_HEADER_FORMAT = "<4sI16sIIIQ"
+# The boundary is one line: [0, receiver_region_offset) is the manager's
+# (header + session table); [receiver_region_offset, total_size) is the
+# receivers'. BlockDecoded over UDS is the only progress path -- the manager
+# writes nothing into the receiver region and the receivers write nothing
+# into the manager region.
+SHM_HEADER_FORMAT = "<4sI16sIQQQ"
 SHM_MAGIC = b"NXRX"
-SHM_VERSION = 1
+SHM_VERSION = 2
 SHM_SESSION_TABLE_OFFSET = 64
 
 # Session table entry: session_id (fixed, null-padded), total_blocks (u64),
@@ -39,6 +40,11 @@ SHM_SESSION_ENTRY_FORMAT = f"<{SHM_SESSION_ID_BYTES}sQQQ"
 # Bytes reserved for the session table; per-session block-table and bitmap
 # regions start after it.
 SHM_SESSION_TABLE_BYTES = 4096
+
+# Start of the receiver region: header reservation + session table. The
+# manager's half is [0, RECEIVER_REGION_OFFSET); the receivers' half is
+# [RECEIVER_REGION_OFFSET, total_size).
+RECEIVER_REGION_OFFSET = SHM_SESSION_TABLE_OFFSET + SHM_SESSION_TABLE_BYTES
 
 # SessionSpec sidecar: one JSON file per session, next to its journal file.
 # Python-only (unlike the shm header/session table above, nothing in the

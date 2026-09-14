@@ -7,14 +7,15 @@ size (no alignment padding) precisely so that a native ordering which happens
 to match on today's build machine is not mistaken for the contract.
 
 Header fields, in order: magic (4 bytes), version (u32), boot_id (16 bytes),
-owner_pid (u32), slot_bytes (u32), slot_count (u32), session_table_offset
-(u64). Validity is magic + version only; boot_id / owner_pid are for spotting
-a segment left by a previous boot.
+owner_pid (u32), session_table_offset (u64), receiver_region_offset (u64),
+total_size (u64). Validity is magic + version only; boot_id / owner_pid are
+for spotting a segment left by a previous boot.
 
-`slot_bytes` and `slot_count` are a slot model the manager does not use --
-not the receiver's slot geometry, do not read or derive from them; removed in
-the next shm header revision. The fields a receiver may rely on are magic,
-version, and session_table_offset.
+The boundary is one line: [0, receiver_region_offset) is the manager's
+(header + session table); [receiver_region_offset, total_size) is the
+receivers'. The manager never writes past receiver_region_offset and never
+trusts its own sizing -- the receiver hard-fails open() when the tail is too
+small for total_blocks rather than trusting these numbers.
 """
 
 import struct
@@ -26,7 +27,6 @@ from session_manager.adapters.constants import (
     SHM_MAGIC,
     SHM_SESSION_ENTRY_FORMAT,
     SHM_SESSION_ID_BYTES,
-    SHM_SESSION_TABLE_OFFSET,
     SHM_VERSION,
 )
 from session_manager.domain.ids import SessionId
@@ -53,28 +53,31 @@ class SegmentHeader:
     version: int
     boot_id: bytes
     owner_pid: int
-    # slot_bytes / slot_count: a slot model the manager does not use -- not the
-    # receiver's slot geometry, do not read or derive from them; removed in the
-    # next shm header revision.
-    slot_bytes: int
-    slot_count: int
     session_table_offset: int
+    receiver_region_offset: int
+    total_size: int
 
     @property
     def is_valid(self) -> bool:
         return self.magic == SHM_MAGIC and self.version == SHM_VERSION
 
 
-def build_header(boot_id: bytes, owner_pid: int, slot_bytes: int, slot_count: int) -> bytes:
+def build_header(
+    boot_id: bytes,
+    owner_pid: int,
+    session_table_offset: int,
+    receiver_region_offset: int,
+    total_size: int,
+) -> bytes:
     return struct.pack(
         SHM_HEADER_FORMAT,
         SHM_MAGIC,
         SHM_VERSION,
         boot_id,
         owner_pid,
-        slot_bytes,
-        slot_count,
-        SHM_SESSION_TABLE_OFFSET,
+        session_table_offset,
+        receiver_region_offset,
+        total_size,
     )
 
 

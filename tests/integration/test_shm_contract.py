@@ -5,7 +5,10 @@ from typing import Protocol
 
 import pytest
 
-from session_manager.adapters.constants import SHM_SESSION_TABLE_OFFSET
+from session_manager.adapters.constants import (
+    RECEIVER_REGION_OFFSET,
+    SHM_SESSION_TABLE_OFFSET,
+)
 from session_manager.adapters.posix_shm import PosixShm, detach_resource_tracker
 from session_manager.adapters.shm_layout import HEADER_SIZE, AdoptDecision, build_header
 from session_manager.domain.ids import SessionId
@@ -13,8 +16,7 @@ from session_manager.domain.models import SessionSpec
 from session_manager.ports.protocols import ShmReader, ShmWriter
 from tests.fakes.fake_shm import FakeShm, SegmentState
 
-ARENA_BYTES = 4096
-SLOT_BYTES = 256
+SEGMENT_BYTES = 4096
 SEEDED_PAYLOAD = b"receiver-owned-slot-state-do-not-wipe"
 SESSION = SessionId("s-1")
 
@@ -63,12 +65,12 @@ class FakeHarness:
         return self._fake
 
     def ensure_absent(self) -> None:
-        self._require().set_existing_segment(SegmentState.ABSENT, arena_bytes=ARENA_BYTES)
+        self._require().set_existing_segment(SegmentState.ABSENT, segment_bytes=SEGMENT_BYTES)
 
     def prime(self, *, valid: bool, payload: bytes) -> None:
         fake = self._require()
         state = SegmentState.STALE if valid else SegmentState.INCOMPATIBLE
-        fake.set_existing_segment(state, arena_bytes=ARENA_BYTES)
+        fake.set_existing_segment(state, segment_bytes=SEGMENT_BYTES)
         fake.seed_payload(payload)
 
     def read_payload(self) -> bytes:
@@ -91,7 +93,7 @@ class PosixHarness:
         self._shms: list[PosixShm] = []
 
     def make(self) -> _Shm:
-        shm = PosixShm(slot_bytes=SLOT_BYTES, probe_receiver_alive=lambda: self.alive[0])
+        shm = PosixShm(probe_receiver_alive=lambda: self.alive[0])
         self._shms.append(shm)
         return shm
 
@@ -100,13 +102,17 @@ class PosixHarness:
 
     def prime(self, *, valid: bool, payload: bytes) -> None:
         self._drop_prime_handle()
-        handle = shared_memory.SharedMemory(name=self.name, create=True, size=ARENA_BYTES)
+        handle = shared_memory.SharedMemory(name=self.name, create=True, size=SEGMENT_BYTES)
         detach_resource_tracker(handle)
         buffer = handle.buf
         assert buffer is not None
         if valid:
             buffer[:HEADER_SIZE] = build_header(
-                b"\x00" * 16, 4242, SLOT_BYTES, ARENA_BYTES // SLOT_BYTES
+                b"\x00" * 16,
+                4242,
+                SHM_SESSION_TABLE_OFFSET,
+                RECEIVER_REGION_OFFSET,
+                SEGMENT_BYTES,
             )
         else:
             buffer[:HEADER_SIZE] = b"XXXX" + bytes(HEADER_SIZE - 4)
@@ -158,7 +164,7 @@ def test_absent_segment_is_created_not_adopted(harness: Harness) -> None:
     shm = harness.make()
     harness.ensure_absent()
 
-    assert shm.create_or_adopt(harness.name, ARENA_BYTES) is False
+    assert shm.create_or_adopt(harness.name, SEGMENT_BYTES) is False
     assert shm.last_decision is AdoptDecision.CREATED
     assert not any(harness.read_payload())
 
@@ -170,7 +176,7 @@ def test_valid_segment_with_a_live_receiver_is_adopted_without_wiping(harness: H
     before = harness.read_payload()
     assert any(before)
 
-    assert shm.create_or_adopt(harness.name, ARENA_BYTES) is True
+    assert shm.create_or_adopt(harness.name, SEGMENT_BYTES) is True
     assert shm.last_decision is AdoptDecision.ADOPTED
     assert harness.read_payload() == before
 
@@ -180,7 +186,7 @@ def test_valid_segment_without_a_receiver_is_reinitialised(harness: Harness) -> 
     harness.prime(valid=True, payload=SEEDED_PAYLOAD)
     harness.alive[0] = False
 
-    assert shm.create_or_adopt(harness.name, ARENA_BYTES) is False
+    assert shm.create_or_adopt(harness.name, SEGMENT_BYTES) is False
     assert shm.last_decision is AdoptDecision.REINITIALISED
     assert not any(harness.read_payload())
 
@@ -190,7 +196,7 @@ def test_incompatible_header_is_reinitialised_even_with_a_live_receiver(harness:
     harness.prime(valid=False, payload=SEEDED_PAYLOAD)
     harness.alive[0] = True
 
-    assert shm.create_or_adopt(harness.name, ARENA_BYTES) is False
+    assert shm.create_or_adopt(harness.name, SEGMENT_BYTES) is False
     assert shm.last_decision is AdoptDecision.REINITIALISED
     assert not any(harness.read_payload())
 
@@ -198,7 +204,7 @@ def test_incompatible_header_is_reinitialised_even_with_a_live_receiver(harness:
 def test_bitmap_for_returns_a_readonly_view_that_rejects_writes(harness: Harness) -> None:
     shm = harness.make()
     harness.ensure_absent()
-    shm.create_or_adopt(harness.name, ARENA_BYTES)
+    shm.create_or_adopt(harness.name, SEGMENT_BYTES)
     shm.init_session(
         _spec(),
         block_table_offset=SHM_SESSION_TABLE_OFFSET,
@@ -219,13 +225,13 @@ def test_a_created_segment_can_be_unlinked_then_created_again(harness: Harness) 
     # worked, the name is free and a second create succeeds.
     first = harness.make()
     harness.ensure_absent()
-    assert first.create_or_adopt(harness.name, ARENA_BYTES) is False
+    assert first.create_or_adopt(harness.name, SEGMENT_BYTES) is False
     first.close(unlink=True)
 
     with pytest.raises(FileNotFoundError):
         shared_memory.SharedMemory(name=harness.name, create=False)
 
     second = harness.make()
-    assert second.create_or_adopt(harness.name, ARENA_BYTES) is False
+    assert second.create_or_adopt(harness.name, SEGMENT_BYTES) is False
     assert second.last_decision is AdoptDecision.CREATED
     second.close(unlink=True)

@@ -36,9 +36,7 @@ def _config(tmp_path: Path) -> AppConfig:
             socket_path=tmp_path / "run" / "session-manager.sock",
             lock_path=tmp_path / "run" / "session-manager.lock",
         ),
-        shm=ShmConfig(
-            name=f"nx-test-{uuid.uuid4().hex[:16]}", arena_bytes=1 << 20, slot_bytes=4096
-        ),
+        shm=ShmConfig(name=f"nx-test-{uuid.uuid4().hex[:16]}", segment_bytes=1 << 20),
         aggregation=AggregationConfig(poll_interval_s=0.05, shm_crosscheck=True),
         receivers=ReceiversConfig(count=0, ports=(), binary_path=""),
         supervision=SupervisionConfig(),

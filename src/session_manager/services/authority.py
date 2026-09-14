@@ -53,14 +53,15 @@ MarkIncomplete = Callable[[SessionId, str], None]
 # same as it never publishes.
 QuarantineIncomplete = Callable[[SessionSpec, IncompleteReport], Path]
 
-# PurgeReason -> the wire string PurgeSession.reason has always carried.
-# rx.proto keeps `reason` a free-text string (see RECEIVER_CONTRACT.md s4),
-# so the enum stays an internal vocabulary and this table is the one place
-# the mapping is stated.
-_PURGE_REASON_WIRE: dict[PurgeReason, str] = {
-    PurgeReason.PUBLISHED: "verified",
-    PurgeReason.QUARANTINED: "hash_mismatch",
-    PurgeReason.INCOMPLETE: "incomplete",
+# PurgeReason -> the rx.PurgeReason enum value PurgeSession.reason carries.
+# The receiver's action is identical for all three; the enum is diagnostic
+# only, so a receiver log line can distinguish "we finished" from "we gave
+# up" (see RECEIVER_CONTRACT.md s4). This table is the one place the mapping
+# is stated.
+_PURGE_REASON_WIRE: dict[PurgeReason, int] = {
+    PurgeReason.PUBLISHED: rx_pb2.PurgeReason.PURGE_REASON_PUBLISHED,
+    PurgeReason.QUARANTINED: rx_pb2.PurgeReason.PURGE_REASON_QUARANTINED,
+    PurgeReason.INCOMPLETE: rx_pb2.PurgeReason.PURGE_REASON_INCOMPLETE,
 }
 
 
@@ -131,7 +132,7 @@ class SessionAuthority:
         shm_name: str,
         staging_dir: str,
         journal_dir: str,
-        arena_bytes: int,
+        segment_bytes: int,
         session_region_base: int,
         sweep_interval_s: float,
         stall_timeout_s: float,
@@ -151,7 +152,7 @@ class SessionAuthority:
         self._shm_name: str = shm_name
         self._staging_dir: str = staging_dir
         self._journal_dir: str = journal_dir
-        self._arena_bytes: int = arena_bytes
+        self._segment_bytes: int = segment_bytes
         self._next_offset: int = session_region_base
         self._sweep_interval_s: float = sweep_interval_s
         self._stall_timeout_s: float = stall_timeout_s
@@ -176,7 +177,7 @@ class SessionAuthority:
         # flock before ANYTHING touches shm: two managers on one segment is
         # the worst bug available here, so the second one must fail loudly.
         self._file_lock.acquire()
-        self._adopted = self._shm.create_or_adopt(self._shm_name, self._arena_bytes)
+        self._adopted = self._shm.create_or_adopt(self._shm_name, self._segment_bytes)
         if self._adopted:
             await self._recover()
         # Only reached on the success path -- if acquire() raised, there is no
@@ -228,9 +229,9 @@ class SessionAuthority:
         block_table_offset = self._next_offset
         bitmap_offset = block_table_offset + _bitmap_bytes(spec.total_blocks)
         region_end = bitmap_offset + _bitmap_bytes(spec.total_blocks)
-        if region_end > self._arena_bytes:
+        if region_end > self._segment_bytes:
             raise ManifestRejected(
-                spec.session_id, f"needs {region_end} bytes, arena is {self._arena_bytes}"
+                spec.session_id, f"needs {region_end} bytes, segment is {self._segment_bytes}"
             )
 
         self._file_store.allocate(spec.relpath, spec.file_size)
@@ -347,7 +348,7 @@ class SessionAuthority:
             # holds.
             await self._preserve_incomplete_partial(session_id)
         self._tear_down(session_id)
-        logger.info("session_purged", session_id=session_id, reason=wire_reason)
+        logger.info("session_purged", session_id=session_id, reason=reason.name)
 
     async def _preserve_incomplete_partial(self, session_id: SessionId) -> None:
         # INCOMPLETE only: move the partial to quarantine/ and drop a
@@ -604,5 +605,9 @@ class SessionAuthority:
             block_bytes=spec.symbol_bytes,
             block_table_offset=open_session.block_table_offset,
             bitmap_offset=open_session.bitmap_offset,
+            # A late joiner that never saw the Manifest gets its session
+            # parameters from this message alone -- without file_size it
+            # cannot size its staging view or clip the short tail block.
+            file_size=spec.file_size,
         )
         return codec.encode(session_open)
